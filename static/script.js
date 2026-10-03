@@ -4,14 +4,15 @@
 let selectedFile = null;
 let currentJobId = null;
 let pollTimer = null;
-let originalUrl = null;
+let originalUrl = null;            // blob: URL for a locally-uploaded file
+let stagedPreviewUrl = null;       // server-side preview URL for a fetched URL
+let stagedToken = null;            // server-side token for a fetched URL
 let currentView = "side";
 let sliderDragging = false;
 let sliderSyncing = false;
 let currentVideoDuration = 0;
-let stagedToken = null;
 
-// Populated by index.html when served by Flask (Jinja) — safe fallback for static builds
+// Populated by index.html via `window.EFFECT_LABELS` (only used by static builds)
 const EFFECT_LABELS = window.EFFECT_LABELS || {};
 
 // =========================================================
@@ -104,7 +105,7 @@ function updateTotalSegmentsHint() {
     return;
   }
 
-  const segLen = parseFloat($("segment_duration")?.value) || 2;
+  const segLen = parseFloat($("segment_duration")?.value) || 3;
   const rawTotal = Math.ceil(currentVideoDuration / segLen);
   const total = Math.max(1, Math.min(500, rawTotal));
 
@@ -336,7 +337,7 @@ $("motion_aware")?.addEventListener("change", e => {
 });
 
 // =========================================================
-// FILE PICKER
+// FILE PICKER  —  uploading replaces any previous fetch
 // =========================================================
 fileInput.addEventListener("change", (e) => {
   if (e.target.files.length) setFile(e.target.files[0]);
@@ -354,8 +355,12 @@ dropZone.addEventListener("drop", (e) => {
 
 function setFile(file) {
   if (!file.type.startsWith("video/")) { showError("Please choose a video file."); return; }
+
   selectedFile = file;
+
+  // Clear any previous URL-fetch state
   stagedToken = null;
+  stagedPreviewUrl = null;
 
   if (originalUrl && originalUrl.startsWith("blob:")) URL.revokeObjectURL(originalUrl);
   originalUrl = URL.createObjectURL(file);
@@ -379,14 +384,18 @@ function showOriginalPreview() {
   compareArea.classList.remove("hidden");
   viewToggle.classList.add("hidden");
 
-  originalVideo.src = originalUrl;
-  sliderOriginal.src = originalUrl;
-  singleVideo.src = originalUrl;
+  // Prefer the current source: blob > staged URL
+  const src = originalUrl || stagedPreviewUrl;
+  if (!src) return;
+
+  originalVideo.src = src;
+  sliderOriginal.src = src;
+  singleVideo.src = src;
   setView("single");
 }
 
 // =========================================================
-// FETCH FROM URL
+// FETCH FROM URL  —  fetching replaces any previous upload
 // =========================================================
 document.addEventListener("DOMContentLoaded", () => {
   const fetchBtn = document.getElementById("fetchUrlBtn");
@@ -412,10 +421,20 @@ document.addEventListener("DOMContentLoaded", () => {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Fetch failed");
 
+      // ---- Clear local file state so compare view uses the fetched video ----
+      selectedFile = null;
+      if (originalUrl && originalUrl.startsWith("blob:")) {
+        URL.revokeObjectURL(originalUrl);
+      }
+      originalUrl = null;
+
+      // ---- Save the fetched video state ----
       stagedToken = data.token;
+      stagedPreviewUrl = data.preview_url;
       currentVideoDuration = data.duration || 0;
       updateTotalSegmentsHint();
 
+      // ---- Show the fetched video ----
       placeholder.classList.add("hidden");
       compareArea.classList.remove("hidden");
       viewToggle.classList.add("hidden");
@@ -468,7 +487,7 @@ async function runRemixOnStaged() {
     if (!res.ok) throw new Error(data.error || "Remix failed");
 
     currentJobId = data.job_id;
-    stagedToken = null;
+    stagedToken = null;   // consumed by backend
     pollStatus();
   } catch (err) {
     resetUI();
@@ -566,7 +585,7 @@ function pollStatus() {
 }
 
 // =========================================================
-// RESULT — includes Publish to YouTube button
+// RESULT — uses correct original source + publish button
 // =========================================================
 function showResult(previewUrl, downloadUrl) {
   setProgress(100, "✅ Done!");
@@ -579,9 +598,17 @@ function showResult(previewUrl, downloadUrl) {
   sliderRemix.src = previewUrl;
   singleVideo.src = previewUrl;
 
+  // ---- Pick the correct original source ----
   if (originalUrl) {
+    // Locally-uploaded file — use the blob
     originalVideo.src = originalUrl;
     sliderOriginal.src = originalUrl;
+  } else if (stagedPreviewUrl) {
+    // Fetched from URL — use the server-staged preview
+    originalVideo.src = stagedPreviewUrl;
+    sliderOriginal.src = stagedPreviewUrl;
+  } else {
+    console.warn("No original source available for compare view");
   }
 
   setView("side");
@@ -624,10 +651,20 @@ async function onPublishToYouTube(publishBtn) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title, caption: description }),
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Publish failed");
 
-    alert("✅ Added to Buffer queue for YouTube!\n\nCheck your Buffer dashboard to confirm the scheduled time.");
+    const text = await res.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Error(`Server error (HTTP ${res.status}): ${text.slice(0, 300)}`);
+    }
+
+    if (data.errors) throw new Error(data.errors.map(e => e.message).join("; "));
+    if (data.buffer_result?.message) throw new Error(data.buffer_result.message);
+    if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+
+    alert("✅ Added to Buffer queue for YouTube!");
   } catch (err) {
     alert("❌ Publish failed:\n" + err.message);
   } finally {
