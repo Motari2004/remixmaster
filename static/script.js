@@ -9,8 +9,9 @@ let currentView = "side";
 let sliderDragging = false;
 let sliderSyncing = false;
 let currentVideoDuration = 0;
-let stagedToken = null;          // token for a staged file (from /fetch_url or /stage_upload)
+let stagedToken = null;
 
+// Populated by index.html via `window.EFFECT_LABELS` (only used by Vercel-style static builds)
 const EFFECT_LABELS = window.EFFECT_LABELS || {};
 
 // =========================================================
@@ -109,7 +110,6 @@ function updateTotalSegmentsHint() {
 
   hintEl.value = total;
   hintEl.title = `${currentVideoDuration.toFixed(2)}s ÷ ${segLen}s = ${total} segments`;
-
   hintEl.style.color = total > 150 ? "#ef4444" : total > 50 ? "#f59e0b" : "";
 
   if (typeof refreshTimelinePreview === "function") refreshTimelinePreview();
@@ -336,7 +336,7 @@ $("motion_aware")?.addEventListener("change", e => {
 });
 
 // =========================================================
-// FILE PICKER (local preview only — nothing sent to server yet)
+// FILE PICKER
 // =========================================================
 fileInput.addEventListener("change", (e) => {
   if (e.target.files.length) setFile(e.target.files[0]);
@@ -355,7 +355,7 @@ dropZone.addEventListener("drop", (e) => {
 function setFile(file) {
   if (!file.type.startsWith("video/")) { showError("Please choose a video file."); return; }
   selectedFile = file;
-  stagedToken = null;                       // clear any previous URL-fetch stage
+  stagedToken = null;
 
   if (originalUrl && originalUrl.startsWith("blob:")) URL.revokeObjectURL(originalUrl);
   originalUrl = URL.createObjectURL(file);
@@ -386,7 +386,7 @@ function showOriginalPreview() {
 }
 
 // =========================================================
-// FETCH FROM URL — Stage only, then preview
+// FETCH FROM URL
 // =========================================================
 document.addEventListener("DOMContentLoaded", () => {
   const fetchBtn = document.getElementById("fetchUrlBtn");
@@ -416,19 +416,15 @@ document.addEventListener("DOMContentLoaded", () => {
       currentVideoDuration = data.duration || 0;
       updateTotalSegmentsHint();
 
-      // Show the fetched video in the preview pane — no remix yet
       placeholder.classList.add("hidden");
       compareArea.classList.remove("hidden");
       viewToggle.classList.add("hidden");
 
-      const previewUrl = data.preview_url;
-
-      originalVideo.src = previewUrl;
-      sliderOriginal.src = previewUrl;
-      singleVideo.src = previewUrl;
-      previewVideo.src = previewUrl;
-      sliderRemix.src = previewUrl;
-
+      originalVideo.src = data.preview_url;
+      sliderOriginal.src = data.preview_url;
+      singleVideo.src = data.preview_url;
+      previewVideo.src = data.preview_url;
+      sliderRemix.src = data.preview_url;
       setView("single");
 
       fileInfo.textContent = `🌐 Fetched: ${data.input_name} · ${currentVideoDuration.toFixed(2)}s`;
@@ -437,7 +433,6 @@ document.addEventListener("DOMContentLoaded", () => {
       remixBtn.disabled = false;
       progressWrap.classList.add("hidden");
       hideError();
-
     } catch (err) {
       resetUI();
       showError(err.message);
@@ -449,16 +444,12 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 // =========================================================
-// REMIX — uses staged token if we have one, else uploads first
+// REMIX
 // =========================================================
 remixBtn.addEventListener("click", async () => {
-  if (stagedToken) {
-    return runRemixOnStaged();
-  }
-  if (selectedFile) {
-    return stageUploadAndRemix();
-  }
-  showError("Choose a video file or fetch a URL first.");
+  if (stagedToken) return runRemixOnStaged();
+  if (selectedFile)  return stageUploadAndRemix();
+  showError("Upload a video, paste a URL, or choose a file first.");
 });
 
 async function runRemixOnStaged() {
@@ -472,10 +463,7 @@ async function runRemixOnStaged() {
   const fd = buildOptionsFormData();
 
   try {
-    const res = await fetch(`/remix/${stagedToken}`, {
-      method: "POST",
-      body: fd,
-    });
+    const res = await fetch(`/remix/${stagedToken}`, { method: "POST", body: fd });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Remix failed");
 
@@ -496,7 +484,6 @@ async function stageUploadAndRemix() {
   remixBtn.disabled = true;
   remixBtn.textContent = "⏳ Uploading…";
 
-  // Step 1: upload the file (stage)
   const up = new FormData();
   up.append("video", selectedFile);
 
@@ -505,7 +492,6 @@ async function stageUploadAndRemix() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Upload failed");
 
-    // Step 2: run remix on the staged file
     setProgress(20, "Starting remix…");
     const fd = buildOptionsFormData();
     const res2 = await fetch(`/remix/${data.token}`, { method: "POST", body: fd });
@@ -579,6 +565,9 @@ function pollStatus() {
   }, 800);
 }
 
+// =========================================================
+// RESULT — includes Publish to YouTube button
+// =========================================================
 function showResult(previewUrl, downloadUrl) {
   setProgress(100, "✅ Done!");
   setTimeout(() => progressWrap.classList.add("hidden"), 900);
@@ -590,14 +579,9 @@ function showResult(previewUrl, downloadUrl) {
   sliderRemix.src = previewUrl;
   singleVideo.src = previewUrl;
 
-  // Original side of the compare stays as the staged/uploaded source
   if (originalUrl) {
     originalVideo.src = originalUrl;
     sliderOriginal.src = originalUrl;
-  } else if (stagedToken) {
-    const stagedUrl = `/staged/${stagedToken}`;
-    originalVideo.src = stagedUrl;
-    sliderOriginal.src = stagedUrl;
   }
 
   setView("side");
@@ -608,8 +592,48 @@ function showResult(previewUrl, downloadUrl) {
   downloadBtn.href = downloadUrl;
   resultActions.classList.remove("hidden");
 
+  // ---- Add Publish to YouTube button (idempotent) ----
+  let publishBtn = document.getElementById("publishYtBtn");
+  if (!publishBtn) {
+    publishBtn = document.createElement("button");
+    publishBtn.id = "publishYtBtn";
+    publishBtn.className = "secondary";
+    publishBtn.textContent = "📤 Publish to YouTube";
+    resultActions.appendChild(publishBtn);
+  }
+  publishBtn.onclick = () => onPublishToYouTube(publishBtn);
+
   remixBtn.disabled = false;
   remixBtn.textContent = "🚀 Remix It!";
+}
+
+async function onPublishToYouTube(publishBtn) {
+  const defaultTitle = "My Remix Short";
+  const title = prompt("YouTube title:", defaultTitle);
+  if (!title) return;
+
+  const description = prompt("Description (optional):", title) || title;
+
+  publishBtn.disabled = true;
+  const originalText = publishBtn.textContent;
+  publishBtn.textContent = "⏳ Publishing…";
+
+  try {
+    const res = await fetch(`/publish_to_youtube/${currentJobId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title, caption: description }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Publish failed");
+
+    alert("✅ Added to Buffer queue for YouTube!\n\nCheck your Buffer dashboard to confirm the scheduled time.");
+  } catch (err) {
+    alert("❌ Publish failed:\n" + err.message);
+  } finally {
+    publishBtn.disabled = false;
+    publishBtn.textContent = originalText;
+  }
 }
 
 // =========================================================
