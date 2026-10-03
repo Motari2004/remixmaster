@@ -8,3 +8,4 @@ gunicorn==21.2.0
 Pillow==10.2.0
 imageio==2.34.0
 imageio-ffmpeg==0.4.9
+setuptools<82
