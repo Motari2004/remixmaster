@@ -11,7 +11,7 @@ let sliderSyncing = false;
 let currentVideoDuration = 0;
 let stagedToken = null;
 
-// Populated by index.html via `window.EFFECT_LABELS` (only used by Vercel-style static builds)
+// Populated by index.html when served by Flask (Jinja) — safe fallback for static builds
 const EFFECT_LABELS = window.EFFECT_LABELS || {};
 
 // =========================================================
@@ -119,7 +119,7 @@ $("segment_duration")?.addEventListener("input", updateTotalSegmentsHint);
 $("motion_aware")?.addEventListener("change", updateTotalSegmentsHint);
 
 // =========================================================
-// ORDERED LISTS
+// ORDERED EFFECT LISTS
 // =========================================================
 function initOrderedList(listId, addSelectId, options = {}) {
   const withWindows = !!options.withWindows;
@@ -592,7 +592,7 @@ function showResult(previewUrl, downloadUrl) {
   downloadBtn.href = downloadUrl;
   resultActions.classList.remove("hidden");
 
-  // ---- Add Publish to YouTube button (idempotent) ----
+  // ---- Inject "Publish to YouTube" button (idempotent) ----
   let publishBtn = document.getElementById("publishYtBtn");
   if (!publishBtn) {
     publishBtn = document.createElement("button");
@@ -614,8 +614,8 @@ async function onPublishToYouTube(publishBtn) {
 
   const description = prompt("Description (optional):", title) || title;
 
-  publishBtn.disabled = true;
   const originalText = publishBtn.textContent;
+  publishBtn.disabled = true;
   publishBtn.textContent = "⏳ Publishing…";
 
   try {
