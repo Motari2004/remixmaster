@@ -1,14 +1,15 @@
 """
-🎬 Remix Master — Flask backend (port 5000 / Render-ready)
+🎬 Remix Master — Flask backend (VPS)
+Compatible with a remote frontend hosted on Vercel.
 
 Two-step flow:
   1) Stage: /stage_upload or /fetch_url — downloads and returns a token
   2) Remix: /remix/<token> — runs the remix pipeline on the staged file
 
-Uses persistent storage via DATA_DIR (env var) so files survive restarts
-on Render/Railway/Fly.
-
-Calls external download resolver for page URLs.
+Adds:
+  - Flask-CORS for cross-origin requests from the Vercel frontend
+  - Absolute URLs for preview/download (so Vercel can load them)
+  - Env-var-driven config for allowed origins and API base
 """
 
 import os
@@ -21,6 +22,13 @@ from flask import (
     Flask, render_template, request, jsonify,
     send_from_directory, send_file, url_for
 )
+
+try:
+    from flask_cors import CORS
+except ImportError:
+    CORS = None
+    print("⚠️  flask-cors not installed. Run: pip install flask-cors")
+
 from werkzeug.utils import secure_filename
 from remix_engine import remix_video, grouped_effects, EFFECTS
 
@@ -35,7 +43,7 @@ except ImportError:
 # =========================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Use persistent disk mounted at /data on Render, or local dir in dev
+# Persistent storage directory (default: local project dir)
 DATA_DIR = os.environ.get("DATA_DIR", BASE_DIR)
 UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
 OUTPUT_DIR = os.path.join(DATA_DIR, "outputs")
@@ -45,20 +53,52 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 ALLOWED = {"mp4", "mov", "avi", "mkv", "webm", "m4v"}
 MAX_BYTES = 500 * 1024 * 1024  # 500 MB
 
-# ---- Deployed resolver service ----
+# ---- External resolver service ----
 DOWNLOAD_API_URL = os.environ.get(
     "DOWNLOAD_API_URL",
     "https://ytshortdown-scraper.onrender.com/api/fetch"
 )
-DOWNLOAD_API_TIMEOUT = 90      # Render free tier can cold-start slowly
+DOWNLOAD_API_TIMEOUT = 90
 
 DIRECT_EXTS = {"mp4", "webm", "mov", "m4v", "mkv", "avi"}
 
-STAGED_TTL_SECONDS = 3600      # staged files older than this are cleaned up
+STAGED_TTL_SECONDS = 3600  # staged files older than this are cleaned up
+
+# ---- CORS: allowed origins for the frontend ----
+# Comma-separated list of origins (Vercel + custom domain + local dev)
+DEFAULT_ORIGINS = (
+    "http://localhost:5000,"
+    "http://127.0.0.1:5000,"
+    "http://localhost:3000"
+)
+ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.environ.get("ALLOWED_ORIGINS", DEFAULT_ORIGINS).split(",")
+    if o.strip()
+]
+
+# ---- Public base URL of the API (used for absolute URLs) ----
+# Set this to your public HTTPS URL when deploying (e.g. https://api.scorpiotech.com)
+# If empty, we derive it from each incoming request's host.
+PUBLIC_API_BASE = os.environ.get("PUBLIC_API_BASE", "").rstrip("/")
 
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_BYTES
+
+# ---- Enable CORS ----
+if CORS is not None:
+    CORS(
+        app,
+        resources={
+            r"/*": {
+                "origins": ALLOWED_ORIGINS if ALLOWED_ORIGINS != ["*"] else "*",
+            }
+        },
+        supports_credentials=False,
+        allow_headers="*",
+        methods=["GET", "POST", "OPTIONS"],
+    )
 
 JOBS = {}          # job_id -> job state
 STAGED = {}        # token   -> { fpath, input_name, created_at }
@@ -122,7 +162,6 @@ def looks_like_direct_url(url: str) -> bool:
 
 
 def _probe_duration(fpath):
-    """Return the video duration in seconds, or 0 if unavailable."""
     try:
         from moviepy.editor import VideoFileClip
         clip = VideoFileClip(fpath)
@@ -132,6 +171,20 @@ def _probe_duration(fpath):
     except Exception as e:
         print(f"  ⚠️  Could not probe duration: {e}")
         return 0
+
+
+def public_url(path: str) -> str:
+    """
+    Return an absolute URL for a given path.
+    Uses PUBLIC_API_BASE if set; otherwise derives from the current request.
+    """
+    if PUBLIC_API_BASE:
+        return f"{PUBLIC_API_BASE}{path}"
+    # Derive from request if possible
+    try:
+        return url_for(request.endpoint, _external=True, **request.view_args)
+    except Exception:
+        return path
 
 
 # =========================================================
@@ -222,7 +275,6 @@ def parse_options(src):
 # EXTERNAL RESOLVER
 # =========================================================
 def resolve_via_external_api(video_url: str) -> str:
-    """Ask the deployed resolver for a direct download link."""
     if requests is None:
         raise ValueError("The 'requests' library is not installed on the server.")
 
@@ -445,6 +497,11 @@ def launch_job(input_path, options, input_name="video"):
 # =========================================================
 @app.route("/")
 def index():
+    """
+    On the VPS we still render index.html for local use.
+    On Vercel, the frontend is served as static files and this
+    endpoint isn't used by the browser.
+    """
     effect_labels = {k: v[0] for k, v in EFFECTS.items()}
     return render_template(
         "index.html",
@@ -455,7 +512,18 @@ def index():
 
 @app.route("/healthz")
 def healthz():
-    return jsonify(status="ok"), 200
+    return jsonify(status="ok", service="remix-master"), 200
+
+
+@app.route("/api/effects")
+def api_effects():
+    """Frontend fetches this to build the effect grid dynamically."""
+    effect_labels = {k: v[0] for k, v in EFFECTS.items()}
+    return jsonify(
+        groups=grouped_effects(),
+        labels=effect_labels,
+        all=list(EFFECTS.keys()),
+    )
 
 
 # ---- STAGE: upload a file, get a token (no remix yet) ----
@@ -482,7 +550,7 @@ def stage_upload():
         token=token,
         input_name=file.filename,
         duration=duration,
-        preview_url=url_for("staged_preview", token=token),
+        preview_url=public_url(f"/staged/{token}"),
     )
 
 
@@ -506,7 +574,7 @@ def fetch_url():
         token=token,
         input_name=base_name,
         duration=duration,
-        preview_url=url_for("staged_preview", token=token),
+        preview_url=public_url(f"/staged/{token}"),
     )
 
 
@@ -535,7 +603,11 @@ def staged_preview(token):
     fpath = info["fpath"]
     if not os.path.exists(fpath):
         return "Gone", 404
-    return send_file(fpath, conditional=True)
+    resp = send_file(fpath, conditional=True)
+    # Allow video elements on any origin to load this
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Accept-Ranges"] = "bytes"
+    return resp
 
 
 # ---- Legacy: upload + remix in one shot ----
@@ -559,7 +631,7 @@ def upload():
     return jsonify(job_id=job_id, options=options)
 
 
-# ---- JSON API: fetch + remix in one shot (external clients) ----
+# ---- JSON API: fetch + remix in one shot ----
 @app.route("/api/fetch", methods=["POST"])
 def api_fetch():
     data = request.get_json(silent=True) or {}
@@ -596,8 +668,8 @@ def status(job_id):
         "message": job["message"],
     }
     if job["status"] == "done":
-        resp["download_url"] = url_for("download_attach", filename=job["output"])
-        resp["preview_url"]  = url_for("download", filename=job["output"])
+        resp["download_url"] = public_url(f"/download/{job['output']}")
+        resp["preview_url"]  = public_url(f"/outputs/{job['output']}")
     return jsonify(resp)
 
 
@@ -620,8 +692,10 @@ def effects_list():
 # ENTRYPOINT
 # =========================================================
 if __name__ == "__main__":
-    print(f"🌐 Resolver URL: {DOWNLOAD_API_URL}")
-    print(f"📁 Data dir:     {DATA_DIR}")
+    print(f"🌐 Resolver URL:    {DOWNLOAD_API_URL}")
+    print(f"📁 Data dir:        {DATA_DIR}")
+    print(f"🔗 Public API base: {PUBLIC_API_BASE or '(derived from request)'}")
+    print(f"✅ Allowed origins: {ALLOWED_ORIGINS}")
     port = int(os.environ.get("PORT", 5000))
     debug = os.environ.get("FLASK_DEBUG", "1") == "1"
     app.run(host="0.0.0.0", port=port, debug=debug)

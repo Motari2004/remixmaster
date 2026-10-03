@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Machine Config · provisioning</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+            background: radial-gradient(circle at 20% 30%, #0d1220, #070a12);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 2rem 1.5rem;
+        }
+
+        .config-panel {
+            background: #101624e0;
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid #253153;
+            border-radius: 2.5rem;
+            box-shadow: 0 35px 60px -15px #000000cc, 0 0 0 1px #1e2d4a inset;
+            width: 100%;
+            max-width: 700px;
+            padding: 2.8rem 2.5rem;
+            transition: border 0.2s;
+        }
+
+        .config-panel:hover {
+            border-color: #2e4b7a;
+        }
+
+        .panel-header {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            margin-bottom: 2.5rem;
+            border-bottom: 1px solid #1e2a42;
+            padding-bottom: 1.5rem;
+        }
+
+        .panel-header-icon {
+            background: linear-gradient(145deg, #1e3a8a, #172554);
+            width: 56px;
+            height: 56px;
+            border-radius: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 12px 25px -8px #0f1e4a;
+        }
+
+        .panel-header-icon svg {
+            width: 30px;
+            height: 30px;
+            fill: #b9d0ff;
+        }
+
+        .panel-header h1 {
+            font-size: 2rem;
+            font-weight: 600;
+            letter-spacing: -0.02em;
+            color: #eef4ff;
+            text-shadow: 0 2px 10px #1e3a8a60;
+        }
+
+        .panel-header .sub {
+            font-size: 0.8rem;
+            color: #6b7fa0;
+            font-weight: 400;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            margin-left: auto;
+            background: #0f1629;
+            padding: 0.3rem 1rem;
+            border-radius: 40px;
+            border: 1px solid #25375c;
+        }
+
+        .config-section {
+            margin-bottom: 2rem;
+        }
+
+        .section-title {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.9rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1.2px;
+            color: #8fa3cc;
+            margin-bottom: 1rem;
+        }
+
+        .section-title svg {
+            width: 18px;
+            height: 18px;
+            fill: #4e6e9e;
+        }
+
+        /* hostname */
+        .input-group {
+            margin-bottom: 1.5rem;
+        }
+
+        .input-group label {
+            display: block;
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: #9bb1d9;
+            margin-bottom: 0.5rem;
+            letter-spacing: 0.3px;
+        }
+
+        .input-wrapper {
+            display: flex;
+            align-items: center;
+            background: #0b111f;
+            border-radius: 16px;
+            border: 1px solid #263554;
+            transition: border 0.2s, box-shadow 0.2s;
+        }
+
+        .input-wrapper:focus-within {
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 4px #1e3a8a30;
+        }
+
+        .input-wrapper svg {
+            width: 20px;
+            height: 20px;
+            margin: 0 0.8rem 0 1.2rem;
+            fill: #4c6288;
+            flex-shrink: 0;
+        }
+
+        .input-wrapper input {
+            background: transparent;
+            border: none;
+            width: 100%;
+            padding: 1rem 1rem 1rem 0;
+            font-size: 1rem;
+            color: #e9f0ff;
+            outline: none;
+            font-weight: 400;
+            font-family: inherit;
+        }
+
+        .input-wrapper input::placeholder {
+            color: #3f4e6e;
+            font-weight: 300;
+        }
+
+        /* boot devices row */
+        .boot-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1rem;
+            margin-top: 0.25rem;
+        }
+
+        .boot-item {
+            background: #0b111f;
+            border: 1px solid #1f2c48;
+            border-radius: 16px;
+            padding: 0.9rem 0.8rem;
+            transition: border 0.15s, background 0.15s;
+        }
+
+        .boot-item:hover {
+            border-color: #2d3f64;
+            background: #0e1629;
+        }
+
+        .boot-label {
+            display: block;
+            font-size: 0.65rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            color: #61759e;
+            margin-bottom: 0.4rem;
+        }
+
+        .boot-select {
+            width: 100%;
+            background: transparent;
+            border: none;
+            color: #d2e0ff;
+            font-size: 0.95rem;
+            font-weight: 500;
+            outline: none;
+            padding: 0.2rem 0;
+            font-family: inherit;
+            cursor: pointer;
+            appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='%235f7ab0'%3E%3Cpath d='M7 10l5 5 5-5z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 0 center;
+            background-size: 16px;
+        }
+
+        .boot-select option {
+            background: #0f1629;
+            color: #d2e0ff;
+            font-size: 0.95rem;
+        }
+
+        /* ssh key area */
+        .ssh-hint {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            font-size: 0.75rem;
+            color: #5a6e95;
+            margin-top: 0.4rem;
+            padding-left: 0.3rem;
+            letter-spacing: 0.2px;
+        }
+
+        .ssh-hint svg {
+            width: 14px;
+            height: 14px;
+            fill: #4d6390;
+        }
+
+        .ssh-textarea-wrapper {
+            background: #0b111f;
+            border-radius: 18px;
+            border: 1px solid #263554;
+            transition: border 0.2s, box-shadow 0.2s;
+            padding: 0.2rem;
+        }
+
+        .ssh-textarea-wrapper:focus-within {
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 4px #1e3a8a30;
+        }
+
+        .ssh-textarea-wrapper textarea {
+            width: 100%;
+            background: transparent;
+            border: none;
+            padding: 1rem 1.2rem;
+            font-size: 0.9rem;
+            color: #d7e4ff;
+            outline: none;
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            resize: vertical;
+            min-height: 100px;
+            line-height: 1.5;
+            border-radius: 18px;
+        }
+
+        .ssh-textarea-wrapper textarea::placeholder {
+            color: #3f4e6e;
+            font-weight: 300;
+            font-family: 'Inter', sans-serif;
+        }
+
+        .key-validity {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-top: 0.5rem;
+            min-height: 1.4rem;
+            font-size: 0.8rem;
+            padding-left: 0.4rem;
+        }
+
+        .valid {
+            color: #4ade80;
+        }
+
+        .invalid {
+            color: #f87171;
+        }
+
+        .key-validity svg {
+            width: 14px;
+            height: 14px;
+            fill: currentColor;
+        }
+
+        /* actions */
+        .action-bar {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 1rem;
+            margin-top: 2.5rem;
+            padding-top: 1.5rem;
+            border-top: 1px solid #1d2942;
+        }
+
+        .btn {
+            border: none;
+            padding: 1rem 2rem;
+            border-radius: 40px;
+            font-weight: 600;
+            font-size: 0.95rem;
+            letter-spacing: 0.3px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.6rem;
+            font-family: inherit;
+        }
+
+        .btn-secondary {
+            background: #1a2338;
+            color: #b0c2e5;
+            border: 1px solid #2f3d5e;
+        }
+
+        .btn-secondary:hover {
+            background: #202c47;
+            border-color: #3f5380;
+            color: #d1e0ff;
+        }
+
+        .btn-primary {
+            background: linear-gradient(145deg, #2563eb, #1e40af);
+            color: white;
+            box-shadow: 0 15px 30px -10px #1e3a8a;
+            border: 1px solid #3b82f680;
+        }
+
+        .btn-primary:hover {
+            background: linear-gradient(145deg, #3b82f6, #2563eb);
+            box-shadow: 0 20px 35px -10px #2563eb;
+            transform: scale(1.01);
+        }
+
+        .btn-primary:active {
+            transform: scale(0.98);
+            box-shadow: 0 8px 18px -6px #1e3a8a;
+        }
+
+        .btn svg {
+            width: 18px;
+            height: 18px;
+            fill: currentColor;
+        }
+
+        .toast-message {
+            position: fixed;
+            bottom: 2rem;
+            left: 50%;
+            transform: translateX(-50%) translateY(100px);
+            background: #0f1a2e;
+            border: 1px solid #2e4b7a;
+            color: #b9d0ff;
+            padding: 0.9rem 2rem;
+            border-radius: 40px;
+            font-weight: 500;
+            font-size: 0.9rem;
+            box-shadow: 0 20px 40px -10px #000000;
+            transition: transform 0.3s ease, opacity 0.3s;
+            opacity: 0;
+            z-index: 999;
+            pointer-events: none;
+            backdrop-filter: blur(8px);
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+        }
+
+        .toast-message.show {
+            transform: translateX(-50%) translateY(0);
+            opacity: 1;
+        }
+
+        .toast-message svg {
+            width: 18px;
+            height: 18px;
+            fill: #4ade80;
+        }
+
+        /* responsive */
+        @media (max-width: 600px) {
+            .config-panel {
+                padding: 2rem 1.5rem;
+            }
+            .boot-grid {
+                grid-template-columns: 1fr;
+                gap: 0.8rem;
+            }
+            .action-bar {
+                flex-direction: column-reverse;
+            }
+            .btn {
+                width: 100%;
+                justify-content: center;
+            }
+            .panel-header h1 {
+                font-size: 1.6rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="config-panel">
+        <div class="panel-header">
+            <div class="panel-header-icon">
+                <svg viewBox="0 0 24 24">
+                    <path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 14H4V6h16v12zM8 10h8v2H8zm0 4h5v2H8z"/>
+                </svg>
+            </div>
+            <h1>Machine Config</h1>
+            <div class="sub">PROVISION</div>
+        </div>
+
+        <!-- Hostname -->
+        <div class="config-section">
+            <div class="section-title">
+                <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm1-13h-2v6l5.25 3.15L17 12.23l-4-2.37V7z"/></svg>
+                System Configuration
+            </div>
+            <div class="input-group">
+                <label for="hostname">Hostname</label>
+                <div class="input-wrapper">
+                    <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 4c1.1 0 2 .9 2 2s-.9 2-2 2-2-.9-2-2 .9-2 2-2zm0 13c-1.66 0-3.14-.78-4.12-2h8.24c-.98 1.22-2.46 2-4.12 2z"/></svg>
+                    <input type="text" id="hostname" placeholder="e.g., web-prod-01" value="vpn-gateway-01">
+                </div>
+            </div>
+        </div>
+
+        <!-- Boot Order -->
+        <div class="config-section">
+            <div class="section-title">
+                <svg viewBox="0 0 24 24"><path d="M4 6h16v2H4zm0 5h16v2H4zm0 5h16v2H4z"/></svg>
+                Boot Order
+            </div>
+            <div class="boot-grid">
+                <div class="boot-item">
+                    <span class="boot-label">Boot Device 1</span>
+                    <select class="boot-select" id="boot1">
+                        <option value="disk" selected>Disk</option>
+                        <option value="network">Network</option>
+                        <option value="cdrom">CD-ROM</option>
+                        <option value="none">None</option>
+                    </select>
+                </div>
+                <div class="boot-item">
+                    <span class="boot-label">Boot Device 2</span>
+                    <select class="boot-select" id="boot2">
+                        <option value="none" selected>None</option>
+                        <option value="disk">Disk</option>
+                        <option value="network">Network</option>
+                        <option value="cdrom">CD-ROM</option>
+                    </select>
+                </div>
+                <div class="boot-item">
+                    <span class="boot-label">Boot Device 3</span>
+                    <select class="boot-select" id="boot3">
+                        <option value="none" selected>None</option>
+                        <option value="disk">Disk</option>
+                        <option value="network">Network</option>
+                        <option value="cdrom">CD-ROM</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <!-- SSH Public Key -->
+        <div class="config-section">
+            <div class="section-title">
+                <svg viewBox="0 0 24 24"><path d="M12.65 10C11.83 7.67 9.61 6 7 6c-3.31 0-6 2.69-6 6s2.69 6 6 6c2.61 0 4.83-1.67 5.65-4H17v4h4v-4h2v-4H12.65zM7 14c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/></svg>
+                SSH Public Key
+            </div>
+            <div class="ssh-textarea-wrapper">
+                <textarea id="sshKey" placeholder="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAB... user@host" rows="3"></textarea>
+            </div>
+            <div class="ssh-hint">
+                <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/></svg>
+                Key must start with "ssh-rsa", "ssh-ed25519", or "ecdsa-sha2-nistp256".
+            </div>
+            <div id="keyValidity" class="key-validity"></div>
+        </div>
+
+        <!-- Actions -->
+        <div class="action-bar">
+            <button class="btn btn-secondary" id="resetBtn">
+                <svg viewBox="0 0 24 24"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+                Reset
+            </button>
+            <button class="btn btn-primary" id="applyBtn">
+                <svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"/></svg>
+                Apply Configuration
+            </button>
+        </div>
+    </div>
+
+    <!-- Toast notification -->
+    <div id="toast" class="toast-message">
+        <svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"/></svg>
+        <span id="toastText">Configuration applied</span>
+    </div>
+
+    <script>
+        (function() {
+            const hostnameInput = document.getElementById('hostname');
+            const sshKeyTextarea = document.getElementById('sshKey');
+            const keyValidityDiv = document.getElementById('keyValidity');
+            const boot1 = document.getElementById('boot1');
+            const boot2 = document.getElementById('boot2');
+            const boot3 = document.getElementById('boot3');
+            const resetBtn = document.getElementById('resetBtn');
+            const applyBtn = document.getElementById('applyBtn');
+            const toast = document.getElementById('toast');
+            const toastText = document.getElementById('toastText');
+
+            // Allowed SSH key prefixes (as specified)
+            const ALLOWED_PREFIXES = ['ssh-rsa', 'ssh-ed25519', 'ecdsa-sha2-nistp256'];
+
+            // Helper: validate SSH key format based on prefix
+            function isValidSshKey(key) {
+                const trimmed = key.trim();
+                if (trimmed.length === 0) return true; // empty is allowed (optional)
+                // Check prefix
+                return ALLOWED_PREFIXES.some(prefix => trimmed.startsWith(prefix + ' '));
+            }
+
+            // Show validation feedback for SSH key
+            function updateKeyValidity() {
+                const key = sshKeyTextarea.value.trim();
+                if (key.length === 0) {
+                    keyValidityDiv.innerHTML = ''; // empty, no message
+                    return;
+                }
+                const valid = isValidSshKey(key);
+                if (valid) {
+                    keyValidityDiv.innerHTML = `
+                        <span class="valid">
+                            <svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"/></svg>
+                            Valid key format
+                        </span>`;
+                } else {
+                    keyValidityDiv.innerHTML = `
+                        <span class="invalid">
+                            <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
+                            Invalid key — must start with ssh-rsa, ssh-ed25519, or ecdsa-sha2-nistp256
+                        </span>`;
+                }
+            }
+
+            // Listen to SSH key changes
+            sshKeyTextarea.addEventListener('input', updateKeyValidity);
+
+            // Reset function: restore defaults
+            function resetToDefaults() {
+                hostnameInput.value = 'vpn-gateway-01';
+                boot1.value = 'disk';
+                boot2.value = 'none';
+                boot3.value = 'none';
+                sshKeyTextarea.value = '';
+                keyValidityDiv.innerHTML = '';
+                // Show toast
+                showToast('↺ Defaults restored');
+            }
+
+            // Apply configuration (simulate)
+            function applyConfiguration() {
+                // Validate SSH key before applying
+                const key = sshKeyTextarea.value.trim();
+                if (key.length > 0 && !isValidSshKey(key)) {
+                    showToast('⚠️ Invalid SSH key format', true);
+                    sshKeyTextarea.focus();
+                    return;
+                }
+
+                const hostname = hostnameInput.value.trim() || 'unset';
+                const bootOrder = [boot1.value, boot2.value, boot3.value];
+                const sshKeyStatus = key.length > 0 ? 'provided' : 'not set';
+
+                // Build summary (for demo)
+                console.log('--- Configuration Applied ---');
+                console.log('Hostname:', hostname);
+                console.log('Boot order:', bootOrder.join(' > '));
+                console.log('SSH key:', sshKeyStatus);
+
+                // Show success toast with details
+                showToast(`✅ Config applied · ${hostname} · boot: ${bootOrder[0]}`);
+            }
+
+            // Toast helper
+            let toastTimer = null;
+            function showToast(message, isError = false) {
+                toastText.textContent = message;
+                // change icon/color if error
+                const svgIcon = toast.querySelector('svg');
+                if (isError) {
+                    svgIcon.innerHTML = '<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>';
+                    svgIcon.style.fill = '#f87171';
+                } else {
+                    svgIcon.innerHTML = '<path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"/>';
+                    svgIcon.style.fill = '#4ade80';
+                }
+                toast.classList.add('show');
+                if (toastTimer) clearTimeout(toastTimer);
+                toastTimer = setTimeout(() => {
+                    toast.classList.remove('show');
+                }, 2800);
+            }
+
+            // Event listeners
+            resetBtn.addEventListener('click', resetToDefaults);
+            applyBtn.addEventListener('click', applyConfiguration);
+
+            // Additional nice touch: quick validation on hostname (not required)
+            hostnameInput.addEventListener('input', function() {
+                // just trim on blur? no, leave free
+            });
+
+            // Boot order consistency: ensure no duplicate non-"none" devices? 
+            // Not required, but we could add subtle feedback. For simplicity, keep as is.
+
+            // Prefill SSH key with a demo value? No, leave empty to avoid confusion.
+            // But show the user a sample in placeholder.
+
+            // initialize any state
+            updateKeyValidity();
+
+            // small extra: if user clicks on the ssh hint, focus textarea
+            document.querySelector('.ssh-hint').addEventListener('click', () => {
+                sshKeyTextarea.focus();
+            });
+        })();
+    </script>
+</body>
+</html>
