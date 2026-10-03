@@ -4,11 +4,12 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>🎬 Remix Master</title>
-  <link rel="stylesheet" href="/style.css" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
 </head>
 <body>
   <div class="app">
 
+    <!-- ===================== HEADER ===================== -->
     <header class="hero">
       <h1>🎬 Remix Master</h1>
       <p>Flip · Crop · Speed · Zoom · Color · Blur · Rotate</p>
@@ -17,12 +18,12 @@
 
     <main class="grid">
 
-      <!-- LEFT: CONTROLS -->
+      <!-- ===================== LEFT: CONTROLS ===================== -->
       <section class="panel controls">
 
+        <!-- 1. VIDEO SOURCE -->
         <h2>1. Video Source</h2>
 
-        <!-- UPLOAD -->
         <label id="dropZone" class="drop-zone">
           <input type="file" id="fileInput" accept="video/*" hidden />
           <div class="drop-content">
@@ -32,7 +33,6 @@
           </div>
         </label>
 
-        <!-- URL -->
         <div class="url-row" style="margin-top:12px;">
           <input type="url" id="videoUrl"
                  placeholder="https://... .mp4  or any direct video link"
@@ -48,6 +48,7 @@
 
         <div id="fileInfo" class="file-info hidden"></div>
 
+        <!-- 2. EFFECTS POOL -->
         <h2>2. Effects Pool (random mode)</h2>
         <p class="hint">
           Used only when no ordered list is set below.
@@ -69,6 +70,7 @@
         </div>
         {% endfor %}
 
+        <!-- 3. EFFECT ORDER -->
         <h2>3. Effect Order (super control)</h2>
 
         <!-- BASE EFFECTS -->
@@ -92,7 +94,7 @@
           </select>
         </div>
 
-        <!-- PER-SEGMENT EFFECTS WITH WINDOWS -->
+        <!-- PER-SEGMENT EFFECTS -->
         <div class="order-block">
           <h3>🎬 Per-Segment Effects (with segment windows)</h3>
           <p class="hint">
@@ -139,6 +141,7 @@
           <div id="timelinePreview"></div>
         </div>
 
+        <!-- 4. REMIX SETTINGS -->
         <h2>4. Remix Settings</h2>
 
         <div class="field">
@@ -154,7 +157,6 @@
                  min="1" max="5" value="3" step="1" />
         </div>
 
-        <!-- QUALITY PRESET -->
         <div class="field">
           <label>Output Quality</label>
           <select id="quality_preset" class="add-effect">
@@ -164,12 +166,9 @@
             <option value="max">🏆 Maximum (CRF 14)</option>
             <option value="lossless">💎 Lossless (CRF 0)</option>
           </select>
-          <small class="hint">
-            Output always preserves source resolution.
-          </small>
+          <small class="hint">Output always preserves source resolution.</small>
         </div>
 
-        <!-- CROP SLIDERS — default 95% -->
         <div class="field">
           <label>Crop Top Keeps <output id="outCropTop">95%</output></label>
           <input type="range" id="crop_top_pct"
@@ -214,7 +213,7 @@
         <button id="remixBtn" class="primary" disabled>🚀 Remix It!</button>
       </section>
 
-      <!-- RIGHT: PREVIEW -->
+      <!-- ===================== RIGHT: PREVIEW / COMPARE ===================== -->
       <section class="panel preview">
 
         <div class="preview-header">
@@ -226,14 +225,17 @@
           </div>
         </div>
 
+        <!-- Empty state -->
         <div id="placeholder" class="placeholder">
           <span>🎥</span>
           <p>Your remixed video will appear here</p>
           <small>Upload a video or paste a URL to get started</small>
         </div>
 
+        <!-- Compare area -->
         <div id="compareArea" class="compare-area hidden">
 
+          <!-- SIDE-BY-SIDE -->
           <div id="sideView" class="compare-mode active">
             <div class="video-card">
               <div class="video-label">
@@ -249,6 +251,7 @@
             </div>
           </div>
 
+          <!-- SLIDER OVERLAY -->
           <div id="sliderView" class="compare-mode">
             <div class="slider-container" id="sliderContainer">
               <video id="sliderOriginal" playsinline muted></video>
@@ -266,26 +269,36 @@
             </div>
             <div class="slider-controls">
               <button id="sliderPlayBtn" class="ctrl-btn">▶</button>
-              <input type="range" id="sliderScrub" min="0" max="100" value="0" step="0.1" />
+              <input type="range" id="sliderScrub"
+                     min="0" max="100" value="0" step="0.1" />
               <span id="sliderTime">0:00 / 0:00</span>
             </div>
           </div>
 
+          <!-- SINGLE -->
           <div id="singleView" class="compare-mode">
             <video id="singleVideo" controls playsinline></video>
           </div>
         </div>
 
+        <!-- Progress -->
         <div id="progressWrap" class="progress-wrap hidden">
           <div class="progress-bar"><div id="progressFill"></div></div>
           <p id="progressText">Starting…</p>
         </div>
 
+        <!-- Result actions -->
         <div id="resultActions" class="result-actions hidden">
           <a id="downloadBtn" class="primary" download>⬇️ Download</a>
           <button id="againBtn" class="secondary">🔄 Remix Again</button>
+          <!--
+            📤 The "Publish to YouTube" button is appended here dynamically
+            by script.js after a successful remix completes.
+            See onPublishToYouTube() in static/script.js
+          -->
         </div>
 
+        <!-- Error box -->
         <div id="errorBox" class="error hidden"></div>
       </section>
 
@@ -293,7 +306,6 @@
 
     <footer>Made with 🐍 Python · Flask · MoviePy</footer>
   </div>
-
 
   <script src="{{ url_for('static', filename='script.js') }}"></script>
 </body>
