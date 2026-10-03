@@ -4,15 +4,14 @@
 let selectedFile = null;
 let currentJobId = null;
 let pollTimer = null;
-let originalUrl = null;            // blob: URL for a locally-uploaded file
-let stagedPreviewUrl = null;       // server-side preview URL for a fetched URL
-let stagedToken = null;            // server-side token for a fetched URL
+let originalUrl = null;
+let stagedPreviewUrl = null;
+let stagedToken = null;
 let currentView = "side";
 let sliderDragging = false;
 let sliderSyncing = false;
 let currentVideoDuration = 0;
 
-// Populated by index.html via `window.EFFECT_LABELS` (only used by static builds)
 const EFFECT_LABELS = window.EFFECT_LABELS || {};
 
 // =========================================================
@@ -120,7 +119,7 @@ $("segment_duration")?.addEventListener("input", updateTotalSegmentsHint);
 $("motion_aware")?.addEventListener("change", updateTotalSegmentsHint);
 
 // =========================================================
-// ORDERED EFFECT LISTS
+// ORDERED LISTS
 // =========================================================
 function initOrderedList(listId, addSelectId, options = {}) {
   const withWindows = !!options.withWindows;
@@ -337,7 +336,7 @@ $("motion_aware")?.addEventListener("change", e => {
 });
 
 // =========================================================
-// FILE PICKER  —  uploading replaces any previous fetch
+// FILE PICKER
 // =========================================================
 fileInput.addEventListener("change", (e) => {
   if (e.target.files.length) setFile(e.target.files[0]);
@@ -357,8 +356,6 @@ function setFile(file) {
   if (!file.type.startsWith("video/")) { showError("Please choose a video file."); return; }
 
   selectedFile = file;
-
-  // Clear any previous URL-fetch state
   stagedToken = null;
   stagedPreviewUrl = null;
 
@@ -384,7 +381,6 @@ function showOriginalPreview() {
   compareArea.classList.remove("hidden");
   viewToggle.classList.add("hidden");
 
-  // Prefer the current source: blob > staged URL
   const src = originalUrl || stagedPreviewUrl;
   if (!src) return;
 
@@ -395,7 +391,7 @@ function showOriginalPreview() {
 }
 
 // =========================================================
-// FETCH FROM URL  —  fetching replaces any previous upload
+// FETCH FROM URL
 // =========================================================
 document.addEventListener("DOMContentLoaded", () => {
   const fetchBtn = document.getElementById("fetchUrlBtn");
@@ -421,20 +417,20 @@ document.addEventListener("DOMContentLoaded", () => {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Fetch failed");
 
-      // ---- Clear local file state so compare view uses the fetched video ----
+      // Clear local file state
       selectedFile = null;
       if (originalUrl && originalUrl.startsWith("blob:")) {
         URL.revokeObjectURL(originalUrl);
       }
       originalUrl = null;
 
-      // ---- Save the fetched video state ----
+      // Save fetched state
       stagedToken = data.token;
       stagedPreviewUrl = data.preview_url;
       currentVideoDuration = data.duration || 0;
       updateTotalSegmentsHint();
 
-      // ---- Show the fetched video ----
+      // Show the fetched video
       placeholder.classList.add("hidden");
       compareArea.classList.remove("hidden");
       viewToggle.classList.add("hidden");
@@ -487,7 +483,7 @@ async function runRemixOnStaged() {
     if (!res.ok) throw new Error(data.error || "Remix failed");
 
     currentJobId = data.job_id;
-    stagedToken = null;   // consumed by backend
+    stagedToken = null;
     pollStatus();
   } catch (err) {
     resetUI();
@@ -570,7 +566,7 @@ function pollStatus() {
 
       if (data.status === "done") {
         clearInterval(pollTimer);
-        showResult(data.preview_url, data.download_url);
+        showResult(data.preview_url, data.download_url, data.original_url);
       } else if (data.status === "error") {
         clearInterval(pollTimer);
         resetUI();
@@ -585,9 +581,9 @@ function pollStatus() {
 }
 
 // =========================================================
-// RESULT — uses correct original source + publish button
+// RESULT
 // =========================================================
-function showResult(previewUrl, downloadUrl) {
+function showResult(previewUrl, downloadUrl, originalUrlFromServer) {
   setProgress(100, "✅ Done!");
   setTimeout(() => progressWrap.classList.add("hidden"), 900);
 
@@ -598,17 +594,21 @@ function showResult(previewUrl, downloadUrl) {
   sliderRemix.src = previewUrl;
   singleVideo.src = previewUrl;
 
-  // ---- Pick the correct original source ----
-  if (originalUrl) {
-    // Locally-uploaded file — use the blob
+  // Pick the best original source
+  if (originalUrlFromServer) {
+    console.log("[compare] Using server original:", originalUrlFromServer);
+    originalVideo.src = originalUrlFromServer;
+    sliderOriginal.src = originalUrlFromServer;
+  } else if (originalUrl) {
+    console.log("[compare] Using local blob:", originalUrl);
     originalVideo.src = originalUrl;
     sliderOriginal.src = originalUrl;
   } else if (stagedPreviewUrl) {
-    // Fetched from URL — use the server-staged preview
+    console.warn("[compare] Falling back to staged URL (may 404):", stagedPreviewUrl);
     originalVideo.src = stagedPreviewUrl;
     sliderOriginal.src = stagedPreviewUrl;
   } else {
-    console.warn("No original source available for compare view");
+    console.warn("[compare] No original source available");
   }
 
   setView("side");
@@ -619,7 +619,6 @@ function showResult(previewUrl, downloadUrl) {
   downloadBtn.href = downloadUrl;
   resultActions.classList.remove("hidden");
 
-  // ---- Inject "Publish to YouTube" button (idempotent) ----
   let publishBtn = document.getElementById("publishYtBtn");
   if (!publishBtn) {
     publishBtn = document.createElement("button");

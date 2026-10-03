@@ -8,16 +8,18 @@ Two-step flow:
 Features:
   - Flask-CORS for cross-origin requests from a remote frontend
   - Fixed public_url() — returns proper absolute URLs
+  - Permanent original saved to /outputs/ for the compare view
   - Env-var-driven config for allowed origins and API base
   - Lazy moviepy import — app starts even if FFmpeg is unavailable
   - Buffer API integration for YouTube Shorts auto-posting
-  - Minimum output resolution enforcement for YouTube Shorts
+  - Auto cleanup of old outputs
 """
 
 import os
 import time
 import uuid
 import json
+import shutil
 import threading
 from urllib.parse import urlparse
 from flask import (
@@ -75,6 +77,7 @@ DOWNLOAD_API_URL = os.environ.get(
 DOWNLOAD_API_TIMEOUT = 90
 DIRECT_EXTS = {"mp4", "webm", "mov", "m4v", "mkv", "avi"}
 STAGED_TTL_SECONDS = 3600
+OUTPUT_TTL_SECONDS = 24 * 3600  # clean outputs older than 24 hours
 
 # ---- CORS ----
 DEFAULT_ORIGINS = (
@@ -88,20 +91,13 @@ ALLOWED_ORIGINS = [
     if o.strip()
 ]
 
-# ---- Public base URL for absolute URLs (public_url) ----
-# If set, every URL returned by the API will start with this.
+# ---- Public base URL for absolute URLs ----
 PUBLIC_API_BASE = os.environ.get("PUBLIC_API_BASE", "").rstrip("/")
 
 # ---- Buffer API Configuration ----
 BUFFER_API_URL = "https://api.buffer.com"
 BUFFER_API_KEY = os.environ.get("BUFFER_API_KEY", "")
 BUFFER_YOUTUBE_CHANNEL_ID = os.environ.get("BUFFER_YOUTUBE_CHANNEL_ID", "")
-
-# ---- Output resolution enforcement ----
-MIN_OUTPUT_WIDTH = 1080
-MIN_OUTPUT_HEIGHT = 1920
-MIN_OUTPUT_WIDTH_HORIZONTAL = 1280
-MIN_OUTPUT_HEIGHT_HORIZONTAL = 720
 
 
 app = Flask(__name__)
@@ -196,10 +192,6 @@ def public_url(path: str) -> str:
     Priority:
       1. If PUBLIC_API_BASE is set, use it as the base.
       2. Otherwise, derive scheme + host from the current request.
-
-    NOTE: This is the FIXED version. The previous version used
-    url_for(request.endpoint, ...) which returned the current
-    endpoint's URL (e.g. /status/<job_id>) instead of the desired path.
     """
     if PUBLIC_API_BASE:
         return f"{PUBLIC_API_BASE}{path}"
@@ -477,7 +469,26 @@ def _cleanup_stale_stages():
                 print(f"  ⚠️  Cleanup failed for {fp}: {e}")
 
 
+def _cleanup_old_outputs():
+    """Delete files in outputs/ older than OUTPUT_TTL_SECONDS."""
+    while True:
+        time.sleep(3600)
+        now = time.time()
+        try:
+            for fname in os.listdir(OUTPUT_DIR):
+                fpath = os.path.join(OUTPUT_DIR, fname)
+                try:
+                    if os.path.isfile(fpath) and (now - os.path.getmtime(fpath)) > OUTPUT_TTL_SECONDS:
+                        os.remove(fpath)
+                        print(f"  🧹 Cleaned up old output: {fpath}")
+                except Exception as e:
+                    print(f"  ⚠️  Output cleanup failed for {fpath}: {e}")
+        except Exception as e:
+            print(f"  ⚠️  Output cleanup loop error: {e}")
+
+
 threading.Thread(target=_cleanup_stale_stages, daemon=True).start()
+threading.Thread(target=_cleanup_old_outputs, daemon=True).start()
 
 
 # =========================================================
@@ -518,6 +529,19 @@ def run_job(job_id, input_path, options):
 
             progress_callback=cb,
         )
+
+        # ── Save a permanent copy of the original for the compare view ──
+        try:
+            original_name = f"original_{job_id}.mp4"
+            original_out = os.path.join(OUTPUT_DIR, original_name)
+            if os.path.exists(input_path):
+                shutil.copy2(input_path, original_out)
+                with JOBS_LOCK:
+                    job["original_output"] = original_name
+                print(f"  📼 Original saved: {original_out}")
+        except Exception as e:
+            print(f"  ⚠️  Could not save original: {e}")
+
         with JOBS_LOCK:
             job["status"] = "done"
             job["progress"] = 100
@@ -693,6 +717,8 @@ def status(job_id):
     if job["status"] == "done":
         resp["download_url"] = public_url(f"/download/{job['output']}")
         resp["preview_url"]  = public_url(f"/outputs/{job['output']}")
+        if job.get("original_output"):
+            resp["original_url"] = public_url(f"/outputs/{job['original_output']}")
     return jsonify(resp)
 
 
