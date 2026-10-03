@@ -7,11 +7,10 @@ Two-step flow:
 
 Features:
   - Flask-CORS for cross-origin requests from a remote frontend
-  - Absolute URLs for preview/download
+  - Fixed public_url() — returns proper absolute URLs
   - Env-var-driven config for allowed origins and API base
-  - Lazy moviepy import — the app starts even if FFmpeg is unavailable
+  - Lazy moviepy import — app starts even if FFmpeg is unavailable
   - Buffer API integration for YouTube Shorts auto-posting
-  - Auto-downgrade to faster presets for long videos
   - Minimum output resolution enforcement for YouTube Shorts
 """
 
@@ -89,6 +88,8 @@ ALLOWED_ORIGINS = [
     if o.strip()
 ]
 
+# ---- Public base URL for absolute URLs (public_url) ----
+# If set, every URL returned by the API will start with this.
 PUBLIC_API_BASE = os.environ.get("PUBLIC_API_BASE", "").rstrip("/")
 
 # ---- Buffer API Configuration ----
@@ -96,7 +97,7 @@ BUFFER_API_URL = "https://api.buffer.com"
 BUFFER_API_KEY = os.environ.get("BUFFER_API_KEY", "")
 BUFFER_YOUTUBE_CHANNEL_ID = os.environ.get("BUFFER_YOUTUBE_CHANNEL_ID", "")
 
-# ---- Output resolution enforcement (for YouTube Shorts) ----
+# ---- Output resolution enforcement ----
 MIN_OUTPUT_WIDTH = 1080
 MIN_OUTPUT_HEIGHT = 1920
 MIN_OUTPUT_WIDTH_HORIZONTAL = 1280
@@ -189,10 +190,23 @@ def _probe_duration(fpath):
 
 
 def public_url(path: str) -> str:
+    """
+    Build an absolute URL for the given path.
+
+    Priority:
+      1. If PUBLIC_API_BASE is set, use it as the base.
+      2. Otherwise, derive scheme + host from the current request.
+
+    NOTE: This is the FIXED version. The previous version used
+    url_for(request.endpoint, ...) which returned the current
+    endpoint's URL (e.g. /status/<job_id>) instead of the desired path.
+    """
     if PUBLIC_API_BASE:
         return f"{PUBLIC_API_BASE}{path}"
     try:
-        return url_for(request.endpoint, _external=True, **request.view_args)
+        parsed = urlparse(request.url)
+        base = f"{parsed.scheme}://{parsed.netloc}"
+        return f"{base}{path}"
     except Exception:
         return path
 
@@ -304,7 +318,7 @@ def parse_options(src):
 
     options = {
         "num_segments":        _cast("num_segments", None, lambda v: int(v) if v else None),
-        "segment_duration":    _cast("segment_duration", 3.0, float),   # new default: 3s
+        "segment_duration":    _cast("segment_duration", 3.0, float),
         "effects_per_segment": _cast("effects_per_segment", 3, int),
         "enabled_effects":     enabled,
 
@@ -623,7 +637,7 @@ def staged_preview(token):
     fpath = info["fpath"]
     if not os.path.exists(fpath):
         return "Gone", 404
-    resp = send_file(fpath, conditional=True)
+    resp = send_file(fpath, conditional=True, mimetype="video/mp4")
     resp.headers["Access-Control-Allow-Origin"] = "*"
     resp.headers["Accept-Ranges"] = "bytes"
     return resp
