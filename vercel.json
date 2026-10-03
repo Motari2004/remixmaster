@@ -1,10 +1,9 @@
 {
-  "version": 2,
+  "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": null,
   "buildCommand": null,
   "installCommand": null,
   "outputDirectory": "public",
-  "public": true,
   "cleanUrls": true,
   "trailingSlash": false,
   "headers": [
@@ -30,8 +29,5 @@
         { "key": "Cache-Control", "value": "public, max-age=3600" }
       ]
     }
-  ],
-  "rewrites": [
-    { "source": "/(.*)", "destination": "/$1" }
   ]
 }
