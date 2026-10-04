@@ -9,3 +9,4 @@ Pillow==10.2.0
 imageio==2.34.0
 imageio-ffmpeg==0.4.9
 setuptools<82
+google-generativeai==0.8.3
