@@ -390,7 +390,7 @@ function showOriginalPreview() {
 }
 
 // =========================================================
-// FETCH FROM URL
+// FETCH FROM URL (single video)
 // =========================================================
 document.addEventListener("DOMContentLoaded", () => {
   const fetchBtn = document.getElementById("fetchUrlBtn");
@@ -453,7 +453,7 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 // =========================================================
-// REMIX
+// REMIX (single video)
 // =========================================================
 remixBtn.addEventListener("click", async () => {
   if (stagedToken) return runRemixOnStaged();
@@ -548,7 +548,7 @@ function buildOptionsFormData() {
 }
 
 // =========================================================
-// POLLING
+// POLLING (single video)
 // =========================================================
 function pollStatus() {
   clearInterval(pollTimer);
@@ -575,7 +575,7 @@ function pollStatus() {
 }
 
 // =========================================================
-// RESULT
+// RESULT (single video)
 // =========================================================
 function showResult(previewUrl, downloadUrl, originalUrlFromServer) {
   setProgress(100, "✅ Done!");
@@ -589,19 +589,14 @@ function showResult(previewUrl, downloadUrl, originalUrlFromServer) {
   singleVideo.src = previewUrl;
 
   if (originalUrlFromServer) {
-    console.log("[compare] Using server original:", originalUrlFromServer);
     originalVideo.src = originalUrlFromServer;
     sliderOriginal.src = originalUrlFromServer;
   } else if (originalUrl) {
-    console.log("[compare] Using local blob:", originalUrl);
     originalVideo.src = originalUrl;
     sliderOriginal.src = originalUrl;
   } else if (stagedPreviewUrl) {
-    console.warn("[compare] Falling back to staged URL:", stagedPreviewUrl);
     originalVideo.src = stagedPreviewUrl;
     sliderOriginal.src = stagedPreviewUrl;
-  } else {
-    console.warn("[compare] No original source available");
   }
 
   setView("side");
@@ -627,10 +622,8 @@ function showResult(previewUrl, downloadUrl, originalUrlFromServer) {
 }
 
 async function onPublishToYouTube(publishBtn) {
-  const defaultTitle = "My Remix Short";
-  const title = prompt("YouTube title:", defaultTitle);
+  const title = prompt("YouTube title:", "My Remix Short");
   if (!title) return;
-
   const description = prompt("Description (optional):", title) || title;
 
   const originalText = publishBtn.textContent;
@@ -643,19 +636,13 @@ async function onPublishToYouTube(publishBtn) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title, caption: description }),
     });
-
     const text = await res.text();
     let data;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      throw new Error(`Server error (HTTP ${res.status}): ${text.slice(0, 300)}`);
-    }
-
+    try { data = JSON.parse(text); }
+    catch { throw new Error(`Server error (HTTP ${res.status}): ${text.slice(0, 300)}`); }
     if (data.errors) throw new Error(data.errors.map(e => e.message).join("; "));
     if (data.buffer_result?.message) throw new Error(data.buffer_result.message);
     if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
-
     alert("✅ Added to Buffer queue for YouTube!");
   } catch (err) {
     alert("❌ Publish failed:\n" + err.message);
@@ -1003,27 +990,33 @@ function hideError() {
 })();
 
 // =========================================================
-// AI BATCH PROCESSING (CSV-driven)
+// AI ONE-BY-ONE PROCESSING
 // =========================================================
 (function() {
-  const groupSelect   = document.getElementById("aiGroupSelect");
-  const loadGroupBtn  = document.getElementById("aiLoadGroupBtn");
-  const loadAllBtn    = document.getElementById("aiLoadAllBtn");
-  const refreshBtn    = document.getElementById("aiRefreshGroups");
-  const rawInput      = document.getElementById("aiRawInput");
-  const parseBtn      = document.getElementById("aiParseBtn");
-  const processBtn    = document.getElementById("aiProcessBtn");
-  const remixAllBtn   = document.getElementById("aiRemixAllBtn");
-  const publishAllBtn = document.getElementById("aiPublishAllBtn");
-  const runFullBtn    = document.getElementById("aiRunFullBtn");
-  const clearBtn      = document.getElementById("aiClearBtn");
-  const statusEl      = document.getElementById("aiStatus");
-  const statsEl       = document.getElementById("aiStats");
-  const queueEl       = document.getElementById("aiQueue");
+  const groupSelect    = document.getElementById("aiGroupSelect");
+  const loadGroupBtn   = document.getElementById("aiLoadGroupBtn");
+  const refreshBtn     = document.getElementById("aiRefreshGroups");
+  const rawInput       = document.getElementById("aiRawInput");
+  const parseBtn       = document.getElementById("aiParseBtn");
+  const processOneBtn  = document.getElementById("aiProcessOneBtn");
+  const processSelBtn  = document.getElementById("aiProcessSelectedBtn");
+  const skipBtn        = document.getElementById("aiSkipBtn");
+  const clearBtn       = document.getElementById("aiClearBtn");
+  const statusEl       = document.getElementById("aiStatus");
+  const statsEl        = document.getElementById("aiStats");
+  const queueEl        = document.getElementById("aiQueue");
+
+  const progressPanel  = document.getElementById("aiProgressPanel");
+  const currentTitleEl = document.getElementById("aiCurrentTitle");
+  const currentProgEl  = document.getElementById("aiCurrentProgress");
+  const currentStatusEl= document.getElementById("aiCurrentStatus");
+  const stepsEl        = document.getElementById("aiSteps");
 
   if (!queueEl) return;
 
   let queue = [];
+  let selectedIdx = 0;
+  let isProcessing = false;
 
   function escapeHtml(s) {
     return String(s == null ? "" : s)
@@ -1039,6 +1032,40 @@ function hideError() {
     statusEl.className = "ai-status " + cls;
   }
 
+  function setCurrentProgress(pct, msg) {
+    currentProgEl.style.width = pct + "%";
+    if (msg) currentStatusEl.textContent = msg;
+  }
+
+  function setStep(step, state) {
+    stepsEl.querySelectorAll(".ai-step").forEach(el => {
+      if (el.dataset.step === step) {
+        el.classList.remove("active", "done", "error");
+        if (state) el.classList.add(state);
+      }
+    });
+  }
+
+  function resetSteps() {
+    stepsEl.querySelectorAll(".ai-step").forEach(el => {
+      el.classList.remove("active", "done", "error");
+    });
+    currentProgEl.style.width = "0%";
+    currentStatusEl.textContent = "";
+  }
+
+  function showProgressPanel(item) {
+    progressPanel.classList.remove("hidden");
+    const t = (item.rawTitle || item.url || "").slice(0, 60);
+    currentTitleEl.textContent = t + ((item.rawTitle || "").length > 60 ? "…" : "");
+    resetSteps();
+  }
+
+  function hideProgressPanel() {
+    progressPanel.classList.add("hidden");
+  }
+
+  // ---------- GROUPS ----------
   async function refreshGroups() {
     try {
       const r = await fetch("/api/groups");
@@ -1046,7 +1073,7 @@ function hideError() {
       if (!data.success) throw new Error(data.error || "Failed");
 
       if (!data.groups || !data.groups.length) {
-        groupSelect.innerHTML = '<option value="">— No CSVs found in groups-metadata/ —</option>';
+        groupSelect.innerHTML = '<option value="">— No CSVs found —</option>';
         return;
       }
 
@@ -1062,10 +1089,7 @@ function hideError() {
   }
 
   async function loadGroup(name) {
-    if (!name) {
-      setStatus("Select a group first.", "error");
-      return;
-    }
+    if (!name) { setStatus("Select a group first.", "error"); return; }
     setStatus(`📥 Loading ${name}…`, "working");
 
     try {
@@ -1084,41 +1108,12 @@ function hideError() {
       }));
 
       queue = queue.concat(newItems);
+
+      const firstPending = queue.findIndex(i => i.status === "pending");
+      if (firstPending !== -1) selectedIdx = firstPending;
+
       renderQueue();
       setStatus(`📥 Loaded ${newItems.length} item(s) from ${name}`, "ok");
-    } catch (err) {
-      setStatus(`❌ ${err.message}`, "error");
-    }
-  }
-
-  async function loadAllGroups() {
-    if (!confirm("Load ALL groups? This can be 100+ items.")) return;
-    setStatus("📚 Loading all groups…", "working");
-
-    try {
-      const r = await fetch("/api/groups");
-      const data = await r.json();
-      if (!data.success) throw new Error(data.error || "Failed");
-
-      let loaded = 0;
-      for (const g of data.groups) {
-        const gr = await fetch(`/api/groups/${encodeURIComponent(g.name)}`);
-        const gd = await gr.json();
-        if (!gd.success) continue;
-
-        queue = queue.concat(gd.items.map(it => ({
-          id: it.id || Math.random().toString(36).slice(2, 10),
-          url: it.url,
-          group: g.name,
-          rawTitle: it.title || "",
-          rawDescription: it.description || "",
-          aiTitle: "", aiCaption: "", aiDescription: "", aiHashtags: "",
-          status: "pending", error: null, jobId: null, remixUrl: null, publishError: null,
-        })));
-        loaded += gd.items.length;
-      }
-      renderQueue();
-      setStatus(`📚 Loaded ${loaded} item(s) from ${data.groups.length} group(s)`, "ok");
     } catch (err) {
       setStatus(`❌ ${err.message}`, "error");
     }
@@ -1160,6 +1155,7 @@ function hideError() {
     return items;
   }
 
+  // ---------- RENDER ----------
   function renderQueue() {
     if (!queue.length) {
       queueEl.innerHTML = '<div style="color:var(--muted);font-size:0.8rem">Queue empty — load a group or paste manually.</div>';
@@ -1183,36 +1179,51 @@ function hideError() {
       <div class="stat"><strong>${counts.error}</strong>Errors</div>
     `;
 
-    const byGroup = {};
-    queue.forEach((item, idx) => {
-      item._idx = idx;
-      (byGroup[item.group] = byGroup[item.group] || []).push(item);
-    });
+    queueEl.innerHTML = queue.map((item, idx) =>
+      renderItem(item, idx, idx === selectedIdx)
+    ).join("");
 
-    let html = "";
-    for (const [groupName, items] of Object.entries(byGroup)) {
-      html += `<div class="ai-group-header">📁 ${escapeHtml(groupName)} (${items.length})</div>`;
-      for (const item of items) {
-        html += renderItem(item);
-      }
-    }
-    queueEl.innerHTML = html;
-
-    queueEl.querySelectorAll(".remove-ai-item").forEach(b => {
-      b.addEventListener("click", () => {
-        queue.splice(+b.dataset.idx, 1);
+    queueEl.querySelectorAll(".select-ai-item").forEach(el => {
+      el.addEventListener("click", () => {
+        if (isProcessing) return;
+        selectedIdx = +el.dataset.idx;
         renderQueue();
       });
     });
-    queueEl.querySelectorAll(".remix-one").forEach(b => {
-      b.addEventListener("click", () => remixOne(+b.dataset.idx));
+    queueEl.querySelectorAll(".remove-ai-item").forEach(b => {
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (isProcessing) return;
+        queue.splice(+b.dataset.idx, 1);
+        if (selectedIdx >= queue.length) selectedIdx = Math.max(0, queue.length - 1);
+        renderQueue();
+      });
     });
-    queueEl.querySelectorAll(".publish-one").forEach(b => {
-      b.addEventListener("click", () => publishOne(+b.dataset.idx));
+    queueEl.querySelectorAll(".process-one").forEach(b => {
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (isProcessing) return;
+        selectedIdx = +b.dataset.idx;
+        renderQueue();
+        processSelected();
+      });
+    });
+    queueEl.querySelectorAll(".retry-one").forEach(b => {
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (isProcessing) return;
+        const item = queue[+b.dataset.idx];
+        if (item) {
+          item.status = "pending";
+          item.error = null;
+          item.publishError = null;
+          renderQueue();
+        }
+      });
     });
   }
 
-  function renderItem(item) {
+  function renderItem(item, idx, isCurrent) {
     const labels = {
       pending: "⏳ Pending",
       processing: "🤖 AI…",
@@ -1225,12 +1236,14 @@ function hideError() {
     };
 
     let body = "";
+
     if (!item.aiTitle) {
       body += `
         <div class="ai-title">${escapeHtml(item.rawTitle || "(no title)")}</div>
-        <div class="ai-desc">${escapeHtml((item.rawDescription || "").slice(0, 200))}${(item.rawDescription || "").length > 200 ? "…" : ""}</div>
+        <div class="ai-desc">${escapeHtml((item.rawDescription || "").slice(0, 180))}${(item.rawDescription || "").length > 180 ? "…" : ""}</div>
       `;
     }
+
     if (item.status === "processing") {
       body += `<div class="ai-result loading">🤖 Generating with Gemini…</div>`;
     } else if (item.aiTitle) {
@@ -1260,228 +1273,235 @@ ${escapeHtml(item.aiHashtags)}</div>`;
       body += `<div class="ai-result error">📤 ${escapeHtml(item.publishError)}</div>`;
     }
 
-    const canRemix = item.status === "done" || item.status === "pending";
-    const canPublish = item.status === "remixed" || item.jobId;
+    const canProcess = (item.status === "pending" || item.status === "error" || item.status === "done") && !isProcessing;
+    const isFailed = item.status === "error";
 
     return `
-      <div class="ai-item status-${item.status}" data-idx="${item._idx}">
-        <div class="ai-row">
-          <span class="ai-group">${escapeHtml(item.group)}</span>
+      <div class="ai-item status-${item.status} ${isCurrent ? "current" : ""}" data-idx="${idx}">
+        <div class="ai-row select-ai-item" data-idx="${idx}" style="cursor:pointer">
+          <span class="ai-group">${escapeHtml(item.group)} · #${idx + 1}</span>
           <span class="ai-status-badge">${labels[item.status] || item.status}</span>
-          <button type="button" class="mini-btn remove-ai-item" data-idx="${item._idx}">✕</button>
+          <button type="button" class="mini-btn remove-ai-item" data-idx="${idx}">✕</button>
         </div>
         <div class="ai-url">${escapeHtml(item.url)}</div>
         ${body}
-        <div class="ai-actions-inline">
-          ${canRemix ? `<button type="button" class="mini-btn remix-one" data-idx="${item._idx}">🎬 Remix</button>` : ""}
-          ${canPublish ? `<button type="button" class="mini-btn publish-one" data-idx="${item._idx}">📤 Publish</button>` : ""}
+        <div class="ai-nav-row">
+          ${canProcess ? `
+            <button type="button" class="mini-btn process-one process-btn" data-idx="${idx}">
+              ▶️ Process this
+            </button>
+          ` : ""}
+          ${isFailed ? `
+            <button type="button" class="mini-btn retry-one" data-idx="${idx}">
+              🔄 Reset
+            </button>
+          ` : ""}
         </div>
       </div>
     `;
   }
 
-  async function processAllAI() {
-    const pending = queue.filter(i => i.status === "pending" && !i.aiTitle);
-    if (!pending.length) {
-      setStatus("No pending items to process.", "error");
-      return;
-    }
+  // ---------- ONE-BY-ONE PIPELINE ----------
+  async function processSelected() {
+    if (isProcessing) { setStatus("Already processing…", "error"); return; }
+    const item = queue[selectedIdx];
+    if (!item) { setStatus("No item selected.", "error"); return; }
+
+    isProcessing = true;
+    showProgressPanel(item);
 
     try {
-      const r = await fetch("/api/ai/status");
-      const d = await r.json();
-      if (!d.available) {
-        setStatus("⚠️ AI not configured. Set GEMINI_API_KEY on the server.", "error");
-        return;
+      // ---- STEP 1: AI REFORM ----
+      if (!item.aiTitle) {
+        setStep("ai", "active");
+        setCurrentProgress(10, "🤖 Generating AI content…");
+        item.status = "processing";
+        renderQueue();
+
+        try {
+          const r = await fetch("/api/ai/reformat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              title: item.rawTitle,
+              description: item.rawDescription,
+            }),
+          });
+          const data = await r.json();
+          if (!r.ok || !data.success) throw new Error(data.error || "AI failed");
+
+          item.aiTitle = data.parsed.title || "";
+          item.aiCaption = data.parsed.caption || "";
+          item.aiDescription = data.parsed.description || "";
+          item.aiHashtags = data.parsed.hashtags || "";
+          item.status = "done";
+          setStep("ai", "done");
+          setCurrentProgress(25, "✅ AI reform done");
+        } catch (err) {
+          setStep("ai", "error");
+          throw new Error(`AI: ${err.message}`);
+        }
+      } else {
+        setStep("ai", "done");
+        setCurrentProgress(25, "✅ AI already done");
       }
-    } catch {
-      setStatus("AI status check failed.", "error");
-      return;
-    }
 
-    setStatus(`🤖 Processing ${pending.length} item(s) with Gemini…`, "working");
-    let done = 0, failed = 0;
-
-    for (const item of pending) {
-      item.status = "processing";
+      // ---- STEP 2: FETCH ----
+      setStep("fetch", "active");
+      setCurrentProgress(30, "📥 Fetching video…");
+      item.status = "remixing";
       renderQueue();
 
+      let fetchData;
       try {
-        const r = await fetch("/api/ai/reformat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            title: item.rawTitle,
-            description: item.rawDescription,
-          }),
-        });
-        const data = await r.json();
-        if (!r.ok || !data.success) throw new Error(data.error || "AI failed");
-
-        item.aiTitle = data.parsed.title || "";
-        item.aiCaption = data.parsed.caption || "";
-        item.aiDescription = data.parsed.description || "";
-        item.aiHashtags = data.parsed.hashtags || "";
-        item.status = "done";
-        done++;
+        const fd = new FormData();
+        fd.append("video_url", item.url);
+        const r = await fetch("/fetch_url", { method: "POST", body: fd });
+        fetchData = await r.json();
+        if (!r.ok) throw new Error(fetchData.error || "Fetch failed");
+        setStep("fetch", "done");
+        setCurrentProgress(45, "✅ Video fetched");
       } catch (err) {
-        item.status = "error";
-        item.error = err.message;
-        failed++;
+        setStep("fetch", "error");
+        throw new Error(`Fetch: ${err.message}`);
       }
-      renderQueue();
-      await new Promise(r => setTimeout(r, 1200));
-    }
 
-    setStatus(`✅ AI done: ${done} succeeded, ${failed} failed.`, failed ? "error" : "ok");
-  }
+      // ---- STEP 3: REMIX ----
+      setStep("remix", "active");
+      setCurrentProgress(50, "🎬 Starting remix…");
 
-  async function remixOne(idx) {
-    const item = queue[idx];
-    if (!item) return;
+      let remixData;
+      try {
+        const fd2 = new FormData();
+        fd2.append("segment_duration", "3");
+        fd2.append("effects_per_segment", "3");
+        fd2.append("quality_preset", "high");
+        fd2.append("preserve_audio", "1");
+        fd2.append("rotate_order", "1");
 
-    item.status = "remixing";
-    item.error = null;
-    renderQueue();
+        const r = await fetch(`/remix/${fetchData.token}`, { method: "POST", body: fd2 });
+        remixData = await r.json();
+        if (!r.ok) throw new Error(remixData.error || "Remix failed");
+      } catch (err) {
+        setStep("remix", "error");
+        throw new Error(`Remix: ${err.message}`);
+      }
 
-    try {
-      const fd = new FormData();
-      fd.append("video_url", item.url);
-      const r1 = await fetch("/fetch_url", { method: "POST", body: fd });
-      const d1 = await r1.json();
-      if (!r1.ok) throw new Error(d1.error || "Fetch failed");
+      item.jobId = remixData.job_id;
 
-      const fd2 = new FormData();
-      fd2.append("segment_duration", "3");
-      fd2.append("effects_per_segment", "3");
-      fd2.append("quality_preset", "high");
-      fd2.append("preserve_audio", "1");
-      fd2.append("rotate_order", "1");
-
-      const r2 = await fetch(`/remix/${d1.token}`, { method: "POST", body: fd2 });
-      const d2 = await r2.json();
-      if (!r2.ok) throw new Error(d2.error || "Remix failed");
-
-      item.jobId = d2.job_id;
-
+      let remixDone = false;
       let attempts = 0;
-      while (attempts < 400) {
+      while (!remixDone && attempts < 400) {
         await new Promise(r => setTimeout(r, 1500));
         const sr = await fetch(`/status/${item.jobId}`);
         const sd = await sr.json();
+
+        const remixPct = 50 + Math.round((sd.progress || 0) * 0.3);
+        setCurrentProgress(remixPct, `🎬 Remixing… ${sd.progress || 0}%`);
+
         const progEl = document.getElementById(`prog_${item.id}`);
         if (progEl) progEl.textContent = `${sd.progress || 0}%`;
 
         if (sd.status === "done") {
+          remixDone = true;
           item.remixUrl = sd.preview_url;
-          item.status = "remixed";
-          renderQueue();
-          return;
+          setStep("remix", "done");
         } else if (sd.status === "error") {
-          throw new Error(sd.message || "Remix error");
+          setStep("remix", "error");
+          throw new Error(`Remix: ${sd.message || "Unknown error"}`);
         }
         attempts++;
       }
-      throw new Error("Remix timeout");
-    } catch (err) {
-      item.status = "error";
-      item.error = err.message;
-      renderQueue();
-    }
-  }
 
-  async function publishOne(idx) {
-    const item = queue[idx];
-    if (!item || !item.jobId) {
-      setStatus("Must remix first.", "error");
-      return;
-    }
+      if (!remixDone) throw new Error("Remix timeout");
 
-    item.status = "publishing";
-    item.publishError = null;
-    renderQueue();
+      // ---- STEP 4: PUBLISH ----
+      setStep("publish", "active");
+      setCurrentProgress(85, "📤 Publishing to YouTube…");
 
-    try {
-      const r = await fetch(`/publish_to_youtube/${item.jobId}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title: item.aiTitle || item.rawTitle,
-          caption: item.aiCaption || item.rawDescription,
-        }),
-      });
-      const data = await r.json();
+      try {
+        const r = await fetch(`/publish_to_youtube/${item.jobId}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title: item.aiTitle || item.rawTitle,
+            caption: item.aiCaption || item.rawDescription,
+          }),
+        });
+        const data = await r.json();
 
-      if (!r.ok || data.error) {
-        item.status = "remixed";
-        item.publishError = data.error || `HTTP ${r.status}`;
-      } else {
+        if (!r.ok || data.error) throw new Error(data.error || `HTTP ${r.status}`);
+
         item.status = "published";
+        setStep("publish", "done");
+        setCurrentProgress(100, "🚀 Published to YouTube!");
+        setStatus(`✅ Item #${selectedIdx + 1} complete and published!`, "ok");
+      } catch (err) {
+        setStep("publish", "error");
+        item.status = "remixed";
+        item.publishError = err.message;
+        setCurrentProgress(100, `⚠️ Remix OK but publish failed: ${err.message}`);
+        setStatus(`⚠️ Item #${selectedIdx + 1}: remixed but publish failed`, "error");
       }
+
+      renderQueue();
+
+      // ---- AUTO-ADVANCE ----
+      const nextIdx = queue.findIndex((i, ix) =>
+        ix > selectedIdx && (i.status === "pending" || i.status === "error"));
+      if (nextIdx !== -1) {
+        setTimeout(() => {
+          selectedIdx = nextIdx;
+          renderQueue();
+          setStatus(`⏭️ Next: item #${nextIdx + 1}. Click ▶️ Process Next to continue.`, "ok");
+        }, 2000);
+      } else {
+        setStatus(`🏁 All items processed!`, "ok");
+      }
+
     } catch (err) {
-      item.status = "remixed";
-      item.publishError = err.message;
+      setStatus(`❌ ${err.message}`, "error");
+      if (queue[selectedIdx]) {
+        queue[selectedIdx].status = "error";
+        queue[selectedIdx].error = err.message;
+        renderQueue();
+      }
+    } finally {
+      isProcessing = false;
+      setTimeout(() => hideProgressPanel(), 6000);
     }
+  }
+
+  async function processAllSequentially() {
+    if (isProcessing) { setStatus("Already processing…", "error"); return; }
+    const pendingList = queue.map((item, idx) => ({ item, idx }))
+                            .filter(x => x.item.status === "pending" || x.item.status === "error");
+    if (!pendingList.length) { setStatus("No pending items.", "error"); return; }
+    if (!confirm(`Process ${pendingList.length} item(s) sequentially?\nEach takes ~1-2 minutes.`)) return;
+
+    for (const { idx } of pendingList) {
+      selectedIdx = idx;
+      renderQueue();
+      await processSelected();
+      await new Promise(r => setTimeout(r, 3000));
+    }
+    setStatus("🏁 Sequential processing complete!", "ok");
+  }
+
+  async function skipCurrent() {
+    if (isProcessing) { setStatus("Cannot skip while processing.", "error"); return; }
+    const next = queue.findIndex((i, ix) =>
+      ix > selectedIdx && (i.status === "pending" || i.status === "error"));
+    if (next === -1) { setStatus("No more items to skip to.", "error"); return; }
+    selectedIdx = next;
     renderQueue();
+    setStatus(`⏭️ Skipped to item #${next + 1}`, "ok");
   }
 
-  async function remixAll() {
-    const ready = queue.filter(i => i.status === "done" || i.status === "pending");
-    if (!ready.length) {
-      setStatus("No items to remix.", "error");
-      return;
-    }
-    if (!confirm(`Remix ${ready.length} item(s)? This will take several minutes.`)) return;
-
-    setStatus(`🎬 Remixing ${ready.length} item(s)…`, "working");
-    for (const item of ready) {
-      await remixOne(queue.indexOf(item));
-    }
-    const remixed = queue.filter(i => i.status === "remixed").length;
-    setStatus(`🎬 Remixed: ${remixed} total.`, "ok");
-  }
-
-  async function publishAll() {
-    const ready = queue.filter(i => i.status === "remixed" && i.jobId);
-    if (!ready.length) {
-      setStatus("No remixed items to publish.", "error");
-      return;
-    }
-    if (!confirm(`Publish ${ready.length} item(s) to YouTube via Buffer?`)) return;
-
-    setStatus(`📤 Publishing ${ready.length} item(s)…`, "working");
-    for (const item of ready) {
-      await publishOne(queue.indexOf(item));
-      await new Promise(r => setTimeout(r, 500));
-    }
-    const pub = queue.filter(i => i.status === "published").length;
-    setStatus(`🚀 Published: ${pub} total.`, "ok");
-  }
-
-  async function runFull() {
-    if (!queue.length) {
-      setStatus("Queue is empty.", "error");
-      return;
-    }
-    if (!confirm(`Run FULL pipeline on ${queue.length} item(s)?\n\n1. AI reformat\n2. Remix each\n3. Publish each\n\nMay take 30+ minutes.`)) return;
-
-    await processAllAI();
-    await remixAll();
-    await publishAll();
-
-    const final = {
-      total: queue.length,
-      done: queue.filter(i => i.status === "done").length,
-      remixed: queue.filter(i => i.status === "remixed").length,
-      published: queue.filter(i => i.status === "published").length,
-      error: queue.filter(i => i.status === "error").length,
-    };
-    setStatus(`🏁 Pipeline complete — ${final.published} published, ${final.error} errors.`, "ok");
-  }
-
+  // ---------- WIRE BUTTONS ----------
   refreshBtn?.addEventListener("click", refreshGroups);
   loadGroupBtn?.addEventListener("click", () => loadGroup(groupSelect.value));
-  loadAllBtn?.addEventListener("click", loadAllGroups);
+
   parseBtn?.addEventListener("click", () => {
     const text = (rawInput.value || "").trim();
     if (!text) { setStatus("Paste text first.", "error"); return; }
@@ -1492,14 +1512,26 @@ ${escapeHtml(item.aiHashtags)}</div>`;
     renderQueue();
     setStatus(`📥 Added ${items.length} item(s).`, "ok");
   });
-  processBtn?.addEventListener("click", processAllAI);
-  remixAllBtn?.addEventListener("click", remixAll);
-  publishAllBtn?.addEventListener("click", publishAll);
-  runFullBtn?.addEventListener("click", runFull);
+
+  processOneBtn?.addEventListener("click", () => {
+    let idx = selectedIdx;
+    if (!queue[idx] || queue[idx].status === "published") {
+      idx = queue.findIndex(i => i.status === "pending" || i.status === "error");
+    }
+    if (idx === -1) { setStatus("No pending items to process.", "error"); return; }
+    selectedIdx = idx;
+    renderQueue();
+    processSelected();
+  });
+
+  processSelBtn?.addEventListener("click", processAllSequentially);
+  skipBtn?.addEventListener("click", skipCurrent);
   clearBtn?.addEventListener("click", () => {
+    if (isProcessing) { setStatus("Cannot clear while processing.", "error"); return; }
     if (!queue.length) return;
     if (!confirm("Clear the entire queue?")) return;
     queue = [];
+    selectedIdx = 0;
     renderQueue();
     setStatus("Queue cleared.", "");
   });

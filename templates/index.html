@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>🎬 Remix Master</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=2026-10-04b" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=2026-10-04c" />
 </head>
 <body>
   <div class="app">
@@ -224,13 +224,14 @@
           <div id="csvFileList" class="csv-file-list"></div>
         </div>
 
-        <!-- ============ AI BATCH PROCESSING ============ -->
-        <h2>6. AI Batch Processing</h2>
+        <!-- ============ AI ONE-BY-ONE PROCESSING ============ -->
+        <h2>6. AI One-by-One Processing</h2>
 
         <div class="order-block" id="aiBlock">
-          <h3>🤖 TinyToon World Batch Pipeline</h3>
+          <h3>🤖 TinyToon World Pipeline</h3>
           <p class="hint">
-            Select a group, run AI reformatting, then remix and publish.
+            Load a group, then process each video one at a time:
+            AI reformat → fetch → remix → publish.
           </p>
 
           <div class="ai-input">
@@ -245,9 +246,6 @@
               <button type="button" id="aiLoadGroupBtn" class="mini-btn">
                 📥 Load Group
               </button>
-              <button type="button" id="aiLoadAllBtn" class="mini-btn">
-                📚 Load All Groups
-              </button>
               <button type="button" id="aiRefreshGroups" class="mini-btn">
                 🔄 Refresh List
               </button>
@@ -258,8 +256,8 @@
 
           <div class="ai-input">
             <label>
-              <span class="label-text">Or paste groups manually:</span>
-              <textarea id="aiRawInput" rows="6" placeholder="### GROUP: Fruits
+              <span class="label-text">Or paste manually (URL / title / description):</span>
+              <textarea id="aiRawInput" rows="5" placeholder="### GROUP: Fruits
 https://youtube.com/shorts/ABC1
 Fruit Ice Cream! 🍦🍓
 Wow, yummy!..."></textarea>
@@ -273,23 +271,35 @@ Wow, yummy!..."></textarea>
 
           <hr style="border-color:var(--border);margin:16px 0" />
 
+          <!-- ONE-BY-ONE CONTROLS -->
           <div class="ai-actions">
-            <button type="button" id="aiProcessBtn" class="mini-btn">
-              🤖 Reformat All with AI
+            <button type="button" id="aiProcessOneBtn" class="mini-btn process-btn-main">
+              ▶️ Process Next
             </button>
-            <button type="button" id="aiRemixAllBtn" class="mini-btn">
-              🎬 Remix All
+            <button type="button" id="aiProcessSelectedBtn" class="mini-btn">
+              ⚡ Process All Sequentially
             </button>
-            <button type="button" id="aiPublishAllBtn" class="mini-btn">
-              📤 Publish All to YouTube
-            </button>
-            <button type="button" id="aiRunFullBtn" class="mini-btn"
-                    style="background:linear-gradient(135deg,var(--accent),var(--accent-2));color:white;border:none">
-              ⚡ Run Full Pipeline
+            <button type="button" id="aiSkipBtn" class="mini-btn">
+              ⏭️ Skip
             </button>
             <button type="button" id="aiClearBtn" class="mini-btn">
               🗑️ Clear
             </button>
+          </div>
+
+          <!-- CURRENT ITEM PROGRESS PANEL -->
+          <div id="aiProgressPanel" class="ai-progress-panel hidden">
+            <h4>▶️ Processing: <span id="aiCurrentTitle">—</span></h4>
+            <div class="ai-steps" id="aiSteps">
+              <div class="ai-step" data-step="ai">🤖 AI Reform</div>
+              <div class="ai-step" data-step="fetch">📥 Fetch</div>
+              <div class="ai-step" data-step="remix">🎬 Remix</div>
+              <div class="ai-step" data-step="publish">📤 Publish</div>
+            </div>
+            <div class="progress-bar" style="margin-top:8px">
+              <div id="aiCurrentProgress"></div>
+            </div>
+            <div id="aiCurrentStatus" class="ai-status"></div>
           </div>
 
           <div id="aiStatus" class="ai-status"></div>
@@ -373,6 +383,6 @@ Wow, yummy!..."></textarea>
     <footer>Made with 🐍 Python · Flask · MoviePy</footer>
   </div>
 
-  <script src="{{ url_for('static', filename='script.js') }}?v=2026-10-04b"></script>
+  <script src="{{ url_for('static', filename='script.js') }}?v=2026-10-04c"></script>
 </body>
 </html>
