@@ -119,7 +119,7 @@ $("segment_duration")?.addEventListener("input", updateTotalSegmentsHint);
 $("motion_aware")?.addEventListener("change", updateTotalSegmentsHint);
 
 // =========================================================
-// ORDERED LISTS
+// ORDERED EFFECT LISTS
 // =========================================================
 function initOrderedList(listId, addSelectId, options = {}) {
   const withWindows = !!options.withWindows;
@@ -354,7 +354,6 @@ dropZone.addEventListener("drop", (e) => {
 
 function setFile(file) {
   if (!file.type.startsWith("video/")) { showError("Please choose a video file."); return; }
-
   selectedFile = file;
   stagedToken = null;
   stagedPreviewUrl = null;
@@ -417,20 +416,15 @@ document.addEventListener("DOMContentLoaded", () => {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Fetch failed");
 
-      // Clear local file state
       selectedFile = null;
-      if (originalUrl && originalUrl.startsWith("blob:")) {
-        URL.revokeObjectURL(originalUrl);
-      }
+      if (originalUrl && originalUrl.startsWith("blob:")) URL.revokeObjectURL(originalUrl);
       originalUrl = null;
 
-      // Save fetched state
       stagedToken = data.token;
       stagedPreviewUrl = data.preview_url;
       currentVideoDuration = data.duration || 0;
       updateTotalSegmentsHint();
 
-      // Show the fetched video
       placeholder.classList.add("hidden");
       compareArea.classList.remove("hidden");
       viewToggle.classList.add("hidden");
@@ -594,7 +588,6 @@ function showResult(previewUrl, downloadUrl, originalUrlFromServer) {
   sliderRemix.src = previewUrl;
   singleVideo.src = previewUrl;
 
-  // Pick the best original source
   if (originalUrlFromServer) {
     console.log("[compare] Using server original:", originalUrlFromServer);
     originalVideo.src = originalUrlFromServer;
@@ -604,7 +597,7 @@ function showResult(previewUrl, downloadUrl, originalUrlFromServer) {
     originalVideo.src = originalUrl;
     sliderOriginal.src = originalUrl;
   } else if (stagedPreviewUrl) {
-    console.warn("[compare] Falling back to staged URL (may 404):", stagedPreviewUrl);
+    console.warn("[compare] Falling back to staged URL:", stagedPreviewUrl);
     originalVideo.src = stagedPreviewUrl;
     sliderOriginal.src = stagedPreviewUrl;
   } else {
@@ -694,9 +687,6 @@ function pauseAll() {
     .forEach(v => v && v.pause());
 }
 
-// =========================================================
-// SIDE-BY-SIDE SYNC
-// =========================================================
 function wireSideBySideSync() {
   const sync = (src, dst) => {
     if (Math.abs(src.currentTime - dst.currentTime) > 0.2)
@@ -716,9 +706,6 @@ function wireSideBySideSync() {
   previewVideo.onpause  = () => originalVideo.pause();
 }
 
-// =========================================================
-// SLIDER OVERLAY
-// =========================================================
 function wireSliderOverlay() {
   const setSplit = (pct) => {
     pct = Math.max(0, Math.min(100, pct));
@@ -740,9 +727,6 @@ function wireSliderOverlay() {
   setSplit(50);
 }
 
-// =========================================================
-// SLIDER MODE CONTROLS
-// =========================================================
 function wireSliderControls() {
   const play = () => {
     sliderOriginal.currentTime = sliderRemix.currentTime;
@@ -823,6 +807,706 @@ function showError(msg) {
 function hideError() {
   errorBox.classList.add("hidden");
 }
+
+// =========================================================
+// CSV UPLOAD MANAGER
+// =========================================================
+(function() {
+  const dropZone     = document.getElementById("csvDropZone");
+  const fileInput    = document.getElementById("csvFileInput");
+  const progressWrap = document.getElementById("csvUploadProgress");
+  const progressFill = document.getElementById("csvProgressFill");
+  const progressText = document.getElementById("csvProgressText");
+  const resultEl     = document.getElementById("csvUploadResult");
+  const fileListEl   = document.getElementById("csvFileList");
+  const refreshBtn   = document.getElementById("csvRefreshBtn");
+  const deleteAllBtn = document.getElementById("csvDeleteAllBtn");
+
+  if (!dropZone || !fileInput) return;
+
+  function setResult(msg, cls = "") {
+    resultEl.textContent = msg;
+    resultEl.className = "ai-status " + cls;
+  }
+
+  function setProgress(pct, msg) {
+    progressWrap.classList.remove("hidden");
+    progressFill.style.width = pct + "%";
+    progressText.textContent = msg;
+  }
+
+  function hideProgress() {
+    setTimeout(() => progressWrap.classList.add("hidden"), 1200);
+  }
+
+  function escapeHtml(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  async function loadFileList() {
+    try {
+      const r = await fetch("/api/groups");
+      const data = await r.json();
+      if (!data.success) throw new Error(data.error || "Failed");
+
+      if (!data.groups || !data.groups.length) {
+        fileListEl.innerHTML = '<div style="color:var(--muted);font-size:0.8rem;grid-column:1/-1">No CSV files uploaded yet.</div>';
+        return;
+      }
+
+      fileListEl.innerHTML = data.groups.map(g => `
+        <div class="csv-file-item">
+          <span class="name" title="${escapeHtml(g.name)}.csv">${escapeHtml(g.name)}.csv</span>
+          <span class="count">${g.count}</span>
+          <button type="button" class="del" data-name="${escapeHtml(g.name)}" title="Delete">✕</button>
+        </div>
+      `).join("");
+
+      fileListEl.querySelectorAll(".del").forEach(btn => {
+        btn.addEventListener("click", () => deleteFile(btn.dataset.name));
+      });
+
+      if (typeof window.refreshAiGroups === "function") {
+        window.refreshAiGroups();
+      }
+    } catch (err) {
+      fileListEl.innerHTML = `<div style="color:#fca5a5;font-size:0.8rem;grid-column:1/-1">Error: ${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  async function uploadFiles(files) {
+    if (!files || !files.length) return;
+
+    const csvs = [...files].filter(f => f.name.toLowerCase().endsWith(".csv"));
+    if (!csvs.length) {
+      setResult("No CSV files selected.", "error");
+      return;
+    }
+
+    setResult(`📤 Uploading ${csvs.length} file(s)…`, "working");
+    setProgress(5, `Preparing ${csvs.length} file(s)…`);
+
+    const fd = new FormData();
+    csvs.forEach(f => fd.append("files", f));
+
+    try {
+      const result = await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", "/api/upload_csv");
+
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            const pct = Math.round((e.loaded / e.total) * 95);
+            setProgress(pct, `Uploading… ${pct}%`);
+          }
+        };
+
+        xhr.onload = () => {
+          try {
+            const data = JSON.parse(xhr.responseText);
+            if (xhr.status >= 200 && xhr.status < 300) {
+              resolve(data);
+            } else {
+              reject(new Error(data.error || `HTTP ${xhr.status}`));
+            }
+          } catch (e) {
+            reject(new Error(`Invalid response: ${xhr.responseText.slice(0, 200)}`));
+          }
+        };
+
+        xhr.onerror = () => reject(new Error("Network error"));
+        xhr.send(fd);
+      });
+
+      setProgress(100, "✅ Upload complete");
+      hideProgress();
+
+      const okCount = (result.uploaded || []).length;
+      const failCount = (result.failed || []).length;
+
+      if (failCount > 0) {
+        setResult(`✅ Uploaded ${okCount} · ❌ ${failCount} failed`, "error");
+        console.warn("Failed uploads:", result.failed);
+      } else {
+        setResult(`✅ Uploaded ${okCount} file(s) successfully.`, "ok");
+      }
+
+      await loadFileList();
+    } catch (err) {
+      hideProgress();
+      setResult(`❌ Upload failed: ${err.message}`, "error");
+    }
+  }
+
+  async function deleteFile(name) {
+    if (!confirm(`Delete ${name}.csv from the server?`)) return;
+    try {
+      const r = await fetch(`/api/delete_csv/${encodeURIComponent(name)}`, { method: "POST" });
+      const data = await r.json();
+      if (!data.success) throw new Error(data.error || "Delete failed");
+      setResult(`🗑️ Deleted ${name}.csv`, "ok");
+      await loadFileList();
+    } catch (err) {
+      setResult(`❌ ${err.message}`, "error");
+    }
+  }
+
+  async function deleteAll() {
+    if (!confirm("Delete ALL CSV files from groups-metadata/? This cannot be undone.")) return;
+    try {
+      const r = await fetch("/api/groups");
+      const data = await r.json();
+      if (!data.success) throw new Error(data.error || "Failed");
+
+      let deleted = 0;
+      for (const g of data.groups) {
+        const dr = await fetch(`/api/delete_csv/${encodeURIComponent(g.name)}`, { method: "POST" });
+        const dd = await dr.json();
+        if (dd.success) deleted++;
+      }
+      setResult(`🗑️ Deleted ${deleted} file(s)`, "ok");
+      await loadFileList();
+    } catch (err) {
+      setResult(`❌ ${err.message}`, "error");
+    }
+  }
+
+  fileInput.addEventListener("change", (e) => {
+    if (e.target.files.length) uploadFiles(e.target.files);
+    fileInput.value = "";
+  });
+
+  ["dragenter", "dragover"].forEach(ev =>
+    dropZone.addEventListener(ev, (e) => { e.preventDefault(); dropZone.classList.add("drag"); })
+  );
+  ["dragleave", "drop"].forEach(ev =>
+    dropZone.addEventListener(ev, (e) => { e.preventDefault(); dropZone.classList.remove("drag"); })
+  );
+  dropZone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    const files = e.dataTransfer.files;
+    if (files && files.length) uploadFiles(files);
+  });
+
+  refreshBtn?.addEventListener("click", () => {
+    setResult("🔄 Refreshing…", "");
+    loadFileList();
+  });
+  deleteAllBtn?.addEventListener("click", deleteAll);
+
+  loadFileList();
+})();
+
+// =========================================================
+// AI BATCH PROCESSING (CSV-driven)
+// =========================================================
+(function() {
+  const groupSelect   = document.getElementById("aiGroupSelect");
+  const loadGroupBtn  = document.getElementById("aiLoadGroupBtn");
+  const loadAllBtn    = document.getElementById("aiLoadAllBtn");
+  const refreshBtn    = document.getElementById("aiRefreshGroups");
+  const rawInput      = document.getElementById("aiRawInput");
+  const parseBtn      = document.getElementById("aiParseBtn");
+  const processBtn    = document.getElementById("aiProcessBtn");
+  const remixAllBtn   = document.getElementById("aiRemixAllBtn");
+  const publishAllBtn = document.getElementById("aiPublishAllBtn");
+  const runFullBtn    = document.getElementById("aiRunFullBtn");
+  const clearBtn      = document.getElementById("aiClearBtn");
+  const statusEl      = document.getElementById("aiStatus");
+  const statsEl       = document.getElementById("aiStats");
+  const queueEl       = document.getElementById("aiQueue");
+
+  if (!queueEl) return;
+
+  let queue = [];
+
+  function escapeHtml(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function setStatus(msg, cls = "") {
+    statusEl.textContent = msg;
+    statusEl.className = "ai-status " + cls;
+  }
+
+  async function refreshGroups() {
+    try {
+      const r = await fetch("/api/groups");
+      const data = await r.json();
+      if (!data.success) throw new Error(data.error || "Failed");
+
+      if (!data.groups || !data.groups.length) {
+        groupSelect.innerHTML = '<option value="">— No CSVs found in groups-metadata/ —</option>';
+        return;
+      }
+
+      groupSelect.innerHTML = '<option value="">— Select a group —</option>' +
+        data.groups.map(g =>
+          `<option value="${escapeHtml(g.name)}">${escapeHtml(g.name)} (${g.count} items)</option>`
+        ).join("");
+      setStatus(`📚 Found ${data.groups.length} group(s)`, "ok");
+    } catch (err) {
+      groupSelect.innerHTML = '<option value="">— Error loading —</option>';
+      setStatus(`⚠️ ${err.message}`, "error");
+    }
+  }
+
+  async function loadGroup(name) {
+    if (!name) {
+      setStatus("Select a group first.", "error");
+      return;
+    }
+    setStatus(`📥 Loading ${name}…`, "working");
+
+    try {
+      const r = await fetch(`/api/groups/${encodeURIComponent(name)}`);
+      const data = await r.json();
+      if (!data.success) throw new Error(data.error || "Failed");
+
+      const newItems = data.items.map(it => ({
+        id: it.id || Math.random().toString(36).slice(2, 10),
+        url: it.url,
+        group: name,
+        rawTitle: it.title || "",
+        rawDescription: it.description || "",
+        aiTitle: "", aiCaption: "", aiDescription: "", aiHashtags: "",
+        status: "pending", error: null, jobId: null, remixUrl: null, publishError: null,
+      }));
+
+      queue = queue.concat(newItems);
+      renderQueue();
+      setStatus(`📥 Loaded ${newItems.length} item(s) from ${name}`, "ok");
+    } catch (err) {
+      setStatus(`❌ ${err.message}`, "error");
+    }
+  }
+
+  async function loadAllGroups() {
+    if (!confirm("Load ALL groups? This can be 100+ items.")) return;
+    setStatus("📚 Loading all groups…", "working");
+
+    try {
+      const r = await fetch("/api/groups");
+      const data = await r.json();
+      if (!data.success) throw new Error(data.error || "Failed");
+
+      let loaded = 0;
+      for (const g of data.groups) {
+        const gr = await fetch(`/api/groups/${encodeURIComponent(g.name)}`);
+        const gd = await gr.json();
+        if (!gd.success) continue;
+
+        queue = queue.concat(gd.items.map(it => ({
+          id: it.id || Math.random().toString(36).slice(2, 10),
+          url: it.url,
+          group: g.name,
+          rawTitle: it.title || "",
+          rawDescription: it.description || "",
+          aiTitle: "", aiCaption: "", aiDescription: "", aiHashtags: "",
+          status: "pending", error: null, jobId: null, remixUrl: null, publishError: null,
+        })));
+        loaded += gd.items.length;
+      }
+      renderQueue();
+      setStatus(`📚 Loaded ${loaded} item(s) from ${data.groups.length} group(s)`, "ok");
+    } catch (err) {
+      setStatus(`❌ ${err.message}`, "error");
+    }
+  }
+
+  function parseGroups(text) {
+    const lines = text.split(/\r?\n/);
+    const items = [];
+    let currentGroup = "manual";
+    let buffer = [];
+
+    function flushBuffer() {
+      const cleaned = buffer.map(l => l.trim()).filter(Boolean);
+      if (cleaned.length >= 2) {
+        const url = cleaned[0];
+        const title = cleaned[1];
+        const description = cleaned.slice(2).join(" ");
+        if (/^https?:\/\//i.test(url)) {
+          items.push({
+            id: Math.random().toString(36).slice(2, 10),
+            url, group: currentGroup,
+            rawTitle: title, rawDescription: description,
+            aiTitle: "", aiCaption: "", aiDescription: "", aiHashtags: "",
+            status: "pending", error: null, jobId: null, remixUrl: null, publishError: null,
+          });
+        }
+      }
+      buffer = [];
+    }
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      const gm = trimmed.match(/^###\s*GROUP\s*:\s*(.+)$/i);
+      if (gm) { flushBuffer(); currentGroup = gm[1].trim(); continue; }
+      if (!trimmed) { flushBuffer(); continue; }
+      buffer.push(trimmed);
+    }
+    flushBuffer();
+    return items;
+  }
+
+  function renderQueue() {
+    if (!queue.length) {
+      queueEl.innerHTML = '<div style="color:var(--muted);font-size:0.8rem">Queue empty — load a group or paste manually.</div>';
+      statsEl.innerHTML = "";
+      return;
+    }
+
+    const counts = {
+      pending: queue.filter(i => i.status === "pending").length,
+      done: queue.filter(i => i.status === "done").length,
+      error: queue.filter(i => i.status === "error").length,
+      remixed: queue.filter(i => i.status === "remixed").length,
+      published: queue.filter(i => i.status === "published").length,
+    };
+    statsEl.innerHTML = `
+      <div class="stat"><strong>${queue.length}</strong>Total</div>
+      <div class="stat"><strong>${counts.pending}</strong>Pending</div>
+      <div class="stat"><strong>${counts.done}</strong>AI Done</div>
+      <div class="stat"><strong>${counts.remixed}</strong>Remixed</div>
+      <div class="stat"><strong>${counts.published}</strong>Published</div>
+      <div class="stat"><strong>${counts.error}</strong>Errors</div>
+    `;
+
+    const byGroup = {};
+    queue.forEach((item, idx) => {
+      item._idx = idx;
+      (byGroup[item.group] = byGroup[item.group] || []).push(item);
+    });
+
+    let html = "";
+    for (const [groupName, items] of Object.entries(byGroup)) {
+      html += `<div class="ai-group-header">📁 ${escapeHtml(groupName)} (${items.length})</div>`;
+      for (const item of items) {
+        html += renderItem(item);
+      }
+    }
+    queueEl.innerHTML = html;
+
+    queueEl.querySelectorAll(".remove-ai-item").forEach(b => {
+      b.addEventListener("click", () => {
+        queue.splice(+b.dataset.idx, 1);
+        renderQueue();
+      });
+    });
+    queueEl.querySelectorAll(".remix-one").forEach(b => {
+      b.addEventListener("click", () => remixOne(+b.dataset.idx));
+    });
+    queueEl.querySelectorAll(".publish-one").forEach(b => {
+      b.addEventListener("click", () => publishOne(+b.dataset.idx));
+    });
+  }
+
+  function renderItem(item) {
+    const labels = {
+      pending: "⏳ Pending",
+      processing: "🤖 AI…",
+      done: "✅ AI Ready",
+      error: "❌ Error",
+      remixing: "🎬 Remixing",
+      remixed: "✅ Remixed",
+      publishing: "📤 Publishing",
+      published: "🚀 Published",
+    };
+
+    let body = "";
+    if (!item.aiTitle) {
+      body += `
+        <div class="ai-title">${escapeHtml(item.rawTitle || "(no title)")}</div>
+        <div class="ai-desc">${escapeHtml((item.rawDescription || "").slice(0, 200))}${(item.rawDescription || "").length > 200 ? "…" : ""}</div>
+      `;
+    }
+    if (item.status === "processing") {
+      body += `<div class="ai-result loading">🤖 Generating with Gemini…</div>`;
+    } else if (item.aiTitle) {
+      body += `<div class="ai-result">
+<strong>📌 TITLE</strong>
+${escapeHtml(item.aiTitle)}
+
+<strong>💬 CAPTION</strong>
+${escapeHtml(item.aiCaption)}
+
+<strong>📝 DESCRIPTION</strong>
+${escapeHtml(item.aiDescription)}
+
+<strong>#️⃣ HASHTAGS</strong>
+${escapeHtml(item.aiHashtags)}</div>`;
+    }
+    if (item.status === "error" && item.error) {
+      body += `<div class="ai-result error">❌ ${escapeHtml(item.error)}</div>`;
+    }
+    if (item.status === "remixing") {
+      body += `<div class="ai-result loading">🎬 Remixing… <span id="prog_${item.id}">0%</span></div>`;
+    }
+    if (item.remixUrl) {
+      body += `<div class="ai-result">🎬 Remixed: <a href="${escapeHtml(item.remixUrl)}" target="_blank" style="color:var(--accent-2)">view</a></div>`;
+    }
+    if (item.publishError) {
+      body += `<div class="ai-result error">📤 ${escapeHtml(item.publishError)}</div>`;
+    }
+
+    const canRemix = item.status === "done" || item.status === "pending";
+    const canPublish = item.status === "remixed" || item.jobId;
+
+    return `
+      <div class="ai-item status-${item.status}" data-idx="${item._idx}">
+        <div class="ai-row">
+          <span class="ai-group">${escapeHtml(item.group)}</span>
+          <span class="ai-status-badge">${labels[item.status] || item.status}</span>
+          <button type="button" class="mini-btn remove-ai-item" data-idx="${item._idx}">✕</button>
+        </div>
+        <div class="ai-url">${escapeHtml(item.url)}</div>
+        ${body}
+        <div class="ai-actions-inline">
+          ${canRemix ? `<button type="button" class="mini-btn remix-one" data-idx="${item._idx}">🎬 Remix</button>` : ""}
+          ${canPublish ? `<button type="button" class="mini-btn publish-one" data-idx="${item._idx}">📤 Publish</button>` : ""}
+        </div>
+      </div>
+    `;
+  }
+
+  async function processAllAI() {
+    const pending = queue.filter(i => i.status === "pending" && !i.aiTitle);
+    if (!pending.length) {
+      setStatus("No pending items to process.", "error");
+      return;
+    }
+
+    try {
+      const r = await fetch("/api/ai/status");
+      const d = await r.json();
+      if (!d.available) {
+        setStatus("⚠️ AI not configured. Set GEMINI_API_KEY on the server.", "error");
+        return;
+      }
+    } catch {
+      setStatus("AI status check failed.", "error");
+      return;
+    }
+
+    setStatus(`🤖 Processing ${pending.length} item(s) with Gemini…`, "working");
+    let done = 0, failed = 0;
+
+    for (const item of pending) {
+      item.status = "processing";
+      renderQueue();
+
+      try {
+        const r = await fetch("/api/ai/reformat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title: item.rawTitle,
+            description: item.rawDescription,
+          }),
+        });
+        const data = await r.json();
+        if (!r.ok || !data.success) throw new Error(data.error || "AI failed");
+
+        item.aiTitle = data.parsed.title || "";
+        item.aiCaption = data.parsed.caption || "";
+        item.aiDescription = data.parsed.description || "";
+        item.aiHashtags = data.parsed.hashtags || "";
+        item.status = "done";
+        done++;
+      } catch (err) {
+        item.status = "error";
+        item.error = err.message;
+        failed++;
+      }
+      renderQueue();
+      await new Promise(r => setTimeout(r, 1200));
+    }
+
+    setStatus(`✅ AI done: ${done} succeeded, ${failed} failed.`, failed ? "error" : "ok");
+  }
+
+  async function remixOne(idx) {
+    const item = queue[idx];
+    if (!item) return;
+
+    item.status = "remixing";
+    item.error = null;
+    renderQueue();
+
+    try {
+      const fd = new FormData();
+      fd.append("video_url", item.url);
+      const r1 = await fetch("/fetch_url", { method: "POST", body: fd });
+      const d1 = await r1.json();
+      if (!r1.ok) throw new Error(d1.error || "Fetch failed");
+
+      const fd2 = new FormData();
+      fd2.append("segment_duration", "3");
+      fd2.append("effects_per_segment", "3");
+      fd2.append("quality_preset", "high");
+      fd2.append("preserve_audio", "1");
+      fd2.append("rotate_order", "1");
+
+      const r2 = await fetch(`/remix/${d1.token}`, { method: "POST", body: fd2 });
+      const d2 = await r2.json();
+      if (!r2.ok) throw new Error(d2.error || "Remix failed");
+
+      item.jobId = d2.job_id;
+
+      let attempts = 0;
+      while (attempts < 400) {
+        await new Promise(r => setTimeout(r, 1500));
+        const sr = await fetch(`/status/${item.jobId}`);
+        const sd = await sr.json();
+        const progEl = document.getElementById(`prog_${item.id}`);
+        if (progEl) progEl.textContent = `${sd.progress || 0}%`;
+
+        if (sd.status === "done") {
+          item.remixUrl = sd.preview_url;
+          item.status = "remixed";
+          renderQueue();
+          return;
+        } else if (sd.status === "error") {
+          throw new Error(sd.message || "Remix error");
+        }
+        attempts++;
+      }
+      throw new Error("Remix timeout");
+    } catch (err) {
+      item.status = "error";
+      item.error = err.message;
+      renderQueue();
+    }
+  }
+
+  async function publishOne(idx) {
+    const item = queue[idx];
+    if (!item || !item.jobId) {
+      setStatus("Must remix first.", "error");
+      return;
+    }
+
+    item.status = "publishing";
+    item.publishError = null;
+    renderQueue();
+
+    try {
+      const r = await fetch(`/publish_to_youtube/${item.jobId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: item.aiTitle || item.rawTitle,
+          caption: item.aiCaption || item.rawDescription,
+        }),
+      });
+      const data = await r.json();
+
+      if (!r.ok || data.error) {
+        item.status = "remixed";
+        item.publishError = data.error || `HTTP ${r.status}`;
+      } else {
+        item.status = "published";
+      }
+    } catch (err) {
+      item.status = "remixed";
+      item.publishError = err.message;
+    }
+    renderQueue();
+  }
+
+  async function remixAll() {
+    const ready = queue.filter(i => i.status === "done" || i.status === "pending");
+    if (!ready.length) {
+      setStatus("No items to remix.", "error");
+      return;
+    }
+    if (!confirm(`Remix ${ready.length} item(s)? This will take several minutes.`)) return;
+
+    setStatus(`🎬 Remixing ${ready.length} item(s)…`, "working");
+    for (const item of ready) {
+      await remixOne(queue.indexOf(item));
+    }
+    const remixed = queue.filter(i => i.status === "remixed").length;
+    setStatus(`🎬 Remixed: ${remixed} total.`, "ok");
+  }
+
+  async function publishAll() {
+    const ready = queue.filter(i => i.status === "remixed" && i.jobId);
+    if (!ready.length) {
+      setStatus("No remixed items to publish.", "error");
+      return;
+    }
+    if (!confirm(`Publish ${ready.length} item(s) to YouTube via Buffer?`)) return;
+
+    setStatus(`📤 Publishing ${ready.length} item(s)…`, "working");
+    for (const item of ready) {
+      await publishOne(queue.indexOf(item));
+      await new Promise(r => setTimeout(r, 500));
+    }
+    const pub = queue.filter(i => i.status === "published").length;
+    setStatus(`🚀 Published: ${pub} total.`, "ok");
+  }
+
+  async function runFull() {
+    if (!queue.length) {
+      setStatus("Queue is empty.", "error");
+      return;
+    }
+    if (!confirm(`Run FULL pipeline on ${queue.length} item(s)?\n\n1. AI reformat\n2. Remix each\n3. Publish each\n\nMay take 30+ minutes.`)) return;
+
+    await processAllAI();
+    await remixAll();
+    await publishAll();
+
+    const final = {
+      total: queue.length,
+      done: queue.filter(i => i.status === "done").length,
+      remixed: queue.filter(i => i.status === "remixed").length,
+      published: queue.filter(i => i.status === "published").length,
+      error: queue.filter(i => i.status === "error").length,
+    };
+    setStatus(`🏁 Pipeline complete — ${final.published} published, ${final.error} errors.`, "ok");
+  }
+
+  refreshBtn?.addEventListener("click", refreshGroups);
+  loadGroupBtn?.addEventListener("click", () => loadGroup(groupSelect.value));
+  loadAllBtn?.addEventListener("click", loadAllGroups);
+  parseBtn?.addEventListener("click", () => {
+    const text = (rawInput.value || "").trim();
+    if (!text) { setStatus("Paste text first.", "error"); return; }
+    const items = parseGroups(text);
+    if (!items.length) { setStatus("No valid items found.", "error"); return; }
+    queue = queue.concat(items);
+    rawInput.value = "";
+    renderQueue();
+    setStatus(`📥 Added ${items.length} item(s).`, "ok");
+  });
+  processBtn?.addEventListener("click", processAllAI);
+  remixAllBtn?.addEventListener("click", remixAll);
+  publishAllBtn?.addEventListener("click", publishAll);
+  runFullBtn?.addEventListener("click", runFull);
+  clearBtn?.addEventListener("click", () => {
+    if (!queue.length) return;
+    if (!confirm("Clear the entire queue?")) return;
+    queue = [];
+    renderQueue();
+    setStatus("Queue cleared.", "");
+  });
+
+  window.refreshAiGroups = refreshGroups;
+  refreshGroups();
+})();
 
 // =========================================================
 // INIT

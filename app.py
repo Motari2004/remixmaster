@@ -9,16 +9,19 @@ Features:
   - Flask-CORS for cross-origin requests from a remote frontend
   - Fixed public_url() — returns proper absolute URLs
   - Permanent original saved to /outputs/ for the compare view
-  - Env-var-driven config for allowed origins and API base
-  - Lazy moviepy import — app starts even if FFmpeg is unavailable
+  - CSV group loading + UI upload for groups-metadata/
+  - Gemini AI content reformatting for TinyToon World
   - Buffer API integration for YouTube Shorts auto-posting
   - Auto cleanup of old outputs
 """
 
 import os
+import re
 import time
 import uuid
 import json
+import glob
+import csv
 import shutil
 import threading
 from urllib.parse import urlparse
@@ -39,6 +42,17 @@ try:
     import requests
 except ImportError:
     requests = None
+
+try:
+    from ai_engine import regenerate_for_tinytoon, parse_ai_response, is_available as ai_available
+except ImportError:
+    print("⚠️  ai_engine not found — AI features disabled")
+    def regenerate_for_tinytoon(t, d):
+        raise RuntimeError("ai_engine not loaded")
+    def parse_ai_response(t):
+        return {"title": "", "caption": "", "description": "", "hashtags": "", "raw": t}
+    def ai_available():
+        return False
 
 
 # =========================================================
@@ -64,8 +78,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("DATA_DIR", BASE_DIR)
 UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
 OUTPUT_DIR = os.path.join(DATA_DIR, "outputs")
+GROUPS_DIR = os.environ.get("GROUPS_DIR", os.path.join(BASE_DIR, "groups-metadata"))
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(GROUPS_DIR, exist_ok=True)
 
 ALLOWED = {"mp4", "mov", "avi", "mkv", "webm", "m4v"}
 MAX_BYTES = 500 * 1024 * 1024
@@ -77,7 +93,7 @@ DOWNLOAD_API_URL = os.environ.get(
 DOWNLOAD_API_TIMEOUT = 90
 DIRECT_EXTS = {"mp4", "webm", "mov", "m4v", "mkv", "avi"}
 STAGED_TTL_SECONDS = 3600
-OUTPUT_TTL_SECONDS = 24 * 3600  # clean outputs older than 24 hours
+OUTPUT_TTL_SECONDS = 24 * 3600
 
 # ---- CORS ----
 DEFAULT_ORIGINS = (
@@ -91,10 +107,9 @@ ALLOWED_ORIGINS = [
     if o.strip()
 ]
 
-# ---- Public base URL for absolute URLs ----
 PUBLIC_API_BASE = os.environ.get("PUBLIC_API_BASE", "").rstrip("/")
 
-# ---- Buffer API Configuration ----
+# ---- Buffer API ----
 BUFFER_API_URL = "https://api.buffer.com"
 BUFFER_API_KEY = os.environ.get("BUFFER_API_KEY", "")
 BUFFER_YOUTUBE_CHANNEL_ID = os.environ.get("BUFFER_YOUTUBE_CHANNEL_ID", "")
@@ -186,13 +201,6 @@ def _probe_duration(fpath):
 
 
 def public_url(path: str) -> str:
-    """
-    Build an absolute URL for the given path.
-
-    Priority:
-      1. If PUBLIC_API_BASE is set, use it as the base.
-      2. Otherwise, derive scheme + host from the current request.
-    """
     if PUBLIC_API_BASE:
         return f"{PUBLIC_API_BASE}{path}"
     try:
@@ -212,7 +220,6 @@ def _require_remix_engine():
 
 
 def _get_buffer_youtube_channel_id():
-    """Return the Buffer YouTube channel ID (from env or by querying the API)."""
     if not BUFFER_API_KEY:
         raise ValueError("BUFFER_API_KEY is not set.")
     if BUFFER_YOUTUBE_CHANNEL_ID:
@@ -470,7 +477,6 @@ def _cleanup_stale_stages():
 
 
 def _cleanup_old_outputs():
-    """Delete files in outputs/ older than OUTPUT_TTL_SECONDS."""
     while True:
         time.sleep(3600)
         now = time.time()
@@ -489,6 +495,218 @@ def _cleanup_old_outputs():
 
 threading.Thread(target=_cleanup_stale_stages, daemon=True).start()
 threading.Thread(target=_cleanup_old_outputs, daemon=True).start()
+
+
+# =========================================================
+# CSV GROUP LOADING
+# =========================================================
+def _load_csv_group(csv_path):
+    """
+    Load one group CSV → list of dicts.
+
+    Handles multiple formats:
+      - url,title,description
+      - Video ID,Title,Description    ← TinyToon format
+      - video_url,video_title,video_description
+    """
+    items = []
+    try:
+        with open(csv_path, "r", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            raw_fields = reader.fieldnames or []
+            fieldnames = [n.strip().lower() for n in raw_fields]
+
+            # --- Detect ID/URL column ---
+            id_col = None
+            url_col = None
+
+            for n in fieldnames:
+                if n in ("video id", "videoid", "video_id", "id"):
+                    id_col = n
+                    break
+            if not id_col:
+                for n in fieldnames:
+                    if n in ("url", "video_url", "link", "short_url"):
+                        url_col = n
+                        break
+
+            # --- Detect title & description ---
+            title_col = next((n for n in fieldnames if n in ("title", "video_title", "name")), None)
+            desc_col = next((n for n in fieldnames if n in ("description", "video_description", "desc", "caption")), None)
+
+            if not id_col and not url_col:
+                print(f"  ⚠️  No ID or URL column in {csv_path}")
+                return items
+
+            # Re-read to get raw rows
+            f.seek(0)
+            reader = csv.DictReader(f)
+
+            for i, row in enumerate(reader):
+                # Case-insensitive lookup
+                row_lc = {}
+                for k, v in row.items():
+                    if k is None:
+                        continue
+                    row_lc[k.strip().lower()] = (v or "").strip()
+
+                # Resolve URL
+                url = ""
+                if url_col:
+                    url = row_lc.get(url_col, "").strip()
+                if not url and id_col:
+                    video_id = row_lc.get(id_col, "").strip()
+                    if video_id:
+                        url = f"https://www.youtube.com/shorts/{video_id}"
+
+                if not url:
+                    continue
+
+                title = row_lc.get(title_col, "").strip() if title_col else ""
+                description = row_lc.get(desc_col, "").strip() if desc_col else ""
+
+                items.append({
+                    "id": f"{os.path.splitext(os.path.basename(csv_path))[0]}_{i+1}",
+                    "url": url,
+                    "video_id": row_lc.get(id_col, "").strip() if id_col else "",
+                    "title": title,
+                    "description": description,
+                })
+
+    except Exception as e:
+        print(f"  ⚠️  Could not read {csv_path}: {e}")
+    return items
+
+
+@app.route("/api/groups")
+def api_groups():
+    try:
+        pattern = os.path.join(GROUPS_DIR, "*.csv")
+        files = sorted(glob.glob(pattern), key=lambda p: (
+            int("".join(c for c in os.path.basename(p) if c.isdigit()) or 0),
+            os.path.basename(p)
+        ))
+        groups = []
+        for path in files:
+            name = os.path.splitext(os.path.basename(path))[0]
+            count = 0
+            try:
+                with open(path, "r", encoding="utf-8-sig") as f:
+                    reader = csv.DictReader(f)
+                    count = sum(1 for _ in reader)
+            except Exception:
+                pass
+            groups.append({"name": name, "count": count})
+        return jsonify(success=True, groups=groups, dir=GROUPS_DIR)
+    except Exception as e:
+        return jsonify(success=False, error=str(e)), 500
+
+
+@app.route("/api/groups/<name>")
+def api_group_detail(name):
+    safe_name = secure_filename(name)
+    path = os.path.join(GROUPS_DIR, f"{safe_name}.csv")
+    if not os.path.exists(path):
+        return jsonify(error=f"Group '{name}' not found"), 404
+
+    items = _load_csv_group(path)
+    return jsonify(success=True, name=safe_name, items=items, count=len(items))
+
+
+# =========================================================
+# UPLOAD CSV FILES INTO groups-metadata/
+# =========================================================
+@app.route("/api/upload_csv", methods=["POST"])
+def upload_csv():
+    if "files" not in request.files:
+        return jsonify(success=False, error="No files provided"), 400
+
+    files = request.files.getlist("files")
+    if not files:
+        return jsonify(success=False, error="No files selected"), 400
+
+    os.makedirs(GROUPS_DIR, exist_ok=True)
+
+    uploaded = []
+    failed = []
+
+    for f in files:
+        if not f or not f.filename:
+            continue
+
+        original_name = f.filename
+        if not original_name.lower().endswith(".csv"):
+            failed.append({"name": original_name, "error": "Not a CSV file"})
+            continue
+
+        safe_name = secure_filename(original_name)
+        if not safe_name:
+            failed.append({"name": original_name, "error": "Invalid filename"})
+            continue
+
+        dest = os.path.join(GROUPS_DIR, safe_name)
+        try:
+            f.save(dest)
+            # Validate CSV
+            try:
+                with open(dest, "r", encoding="utf-8-sig") as fh:
+                    reader = csv.DictReader(fh)
+                    _ = reader.fieldnames
+            except Exception as e:
+                os.remove(dest)
+                failed.append({"name": original_name, "error": f"Invalid CSV: {e}"})
+                continue
+
+            uploaded.append(safe_name)
+            print(f"  📥 CSV uploaded: {safe_name}")
+        except Exception as e:
+            failed.append({"name": original_name, "error": str(e)})
+
+    return jsonify(success=True, uploaded=uploaded, failed=failed, dir=GROUPS_DIR)
+
+
+@app.route("/api/delete_csv/<name>", methods=["POST"])
+def delete_csv(name):
+    safe_name = secure_filename(name)
+    if not safe_name.endswith(".csv"):
+        safe_name += ".csv"
+    path = os.path.join(GROUPS_DIR, safe_name)
+    if not os.path.exists(path):
+        return jsonify(success=False, error="File not found"), 404
+    try:
+        os.remove(path)
+        return jsonify(success=True, deleted=safe_name)
+    except Exception as e:
+        return jsonify(success=False, error=str(e)), 500
+
+
+# =========================================================
+# AI — REFORMAT TITLE + DESCRIPTION FOR TINYTOON WORLD
+# =========================================================
+@app.route("/api/ai/status")
+def ai_status():
+    return jsonify(available=ai_available())
+
+
+@app.route("/api/ai/reformat", methods=["POST"])
+def ai_reformat():
+    if not ai_available():
+        return jsonify(error="AI not configured. Set GEMINI_API_KEY on the server."), 503
+
+    data = request.get_json(silent=True) or {}
+    title = (data.get("title") or "").strip()
+    description = (data.get("description") or "").strip()
+
+    if not title:
+        return jsonify(error="Title is required"), 400
+
+    try:
+        raw = regenerate_for_tinytoon(title, description)
+        parsed = parse_ai_response(raw)
+        return jsonify(success=True, raw=raw, parsed=parsed)
+    except Exception as e:
+        print(f"  ⚠️  AI reformat failed: {e}")
+        return jsonify(error=str(e)), 500
 
 
 # =========================================================
@@ -530,7 +748,7 @@ def run_job(job_id, input_path, options):
             progress_callback=cb,
         )
 
-        # ── Save a permanent copy of the original for the compare view ──
+        # Save permanent original for the compare view
         try:
             original_name = f"original_{job_id}.mp4"
             original_out = os.path.join(OUTPUT_DIR, original_name)
@@ -573,7 +791,7 @@ def launch_job(input_path, options, input_name="video"):
 
 
 # =========================================================
-# ROUTES
+# MAIN ROUTES
 # =========================================================
 @app.route("/")
 def index():
@@ -724,22 +942,12 @@ def status(job_id):
 
 @app.route("/outputs/<filename>")
 def download(filename):
-    return send_from_directory(
-        OUTPUT_DIR,
-        filename,
-        as_attachment=False,
-        mimetype="video/mp4",
-    )
+    return send_from_directory(OUTPUT_DIR, filename, as_attachment=False, mimetype="video/mp4")
 
 
 @app.route("/download/<filename>")
 def download_attach(filename):
-    return send_from_directory(
-        OUTPUT_DIR,
-        filename,
-        as_attachment=True,
-        mimetype="video/mp4",
-    )
+    return send_from_directory(OUTPUT_DIR, filename, as_attachment=True, mimetype="video/mp4")
 
 
 @app.route("/effects")
@@ -747,7 +955,59 @@ def effects_list():
     return jsonify(groups=grouped_effects(), all=list(EFFECTS.keys()))
 
 
-# ---- Publish to YouTube via Buffer ----
+@app.route("/api/fetch_metadata", methods=["POST"])
+def fetch_metadata():
+    if requests is None:
+        return jsonify(error="requests not installed"), 500
+
+    url = ""
+    if request.form.get("url"):
+        url = request.form["url"].strip()
+    else:
+        data = request.get_json(silent=True) or {}
+        url = (data.get("url") or "").strip()
+
+    if not url:
+        return jsonify(error="No URL provided"), 400
+
+    title = ""
+    description = ""
+
+    try:
+        oembed_url = f"https://www.youtube.com/oembed?url={url}&format=json"
+        r = requests.get(oembed_url, timeout=15)
+        if r.ok:
+            o = r.json()
+            title = o.get("title", "")
+            author = o.get("author_name", "")
+            description = f"By {author}" if author else ""
+    except Exception as e:
+        print(f"  ⚠️  oEmbed failed: {e}")
+
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        r = requests.get(url, timeout=15, headers=headers)
+        if r.ok:
+            html = r.text
+            m = re.search(r'<meta\s+name="description"\s+content="([^"]+)"', html)
+            if m:
+                desc = m.group(1)
+                desc = (desc.replace("&quot;", '"').replace("&amp;", "&")
+                            .replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">"))
+                if len(desc) > len(description):
+                    description = desc
+    except Exception as e:
+        print(f"  ⚠️  Page scrape failed: {e}")
+
+    return jsonify(success=True, title=title, description=description, url=url)
+
+
+# =========================================================
+# PUBLISH TO YOUTUBE VIA BUFFER
+# =========================================================
 @app.route("/publish_to_youtube/<job_id>", methods=["POST"])
 def publish_to_youtube(job_id):
     job = JOBS.get(job_id)
@@ -819,8 +1079,10 @@ def publish_to_youtube(job_id):
 if __name__ == "__main__":
     print(f"🌐 Resolver URL:    {DOWNLOAD_API_URL}")
     print(f"📁 Data dir:        {DATA_DIR}")
+    print(f"📚 Groups dir:      {GROUPS_DIR}")
     print(f"🔗 Public API base: {PUBLIC_API_BASE or '(derived from request)'}")
     print(f"✅ Allowed origins: {ALLOWED_ORIGINS}")
+    print(f"🤖 AI available:    {ai_available()}")
     if BUFFER_API_KEY:
         print(f"✅ Buffer API key:  configured")
     else:

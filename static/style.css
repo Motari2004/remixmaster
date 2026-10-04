@@ -895,3 +895,250 @@ footer {
   font-size: 0.85rem;
 }
 .url-row input:focus { border-color: var(--accent); outline: none; }
+
+
+
+/* =========================================
+   CSV UPLOAD PANEL
+   ========================================= */
+.csv-drop {
+  padding: 24px 16px;
+}
+.csv-drop .icon {
+  font-size: 2.8rem;
+}
+
+.csv-file-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 4px;
+}
+.csv-file-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.78rem;
+  gap: 6px;
+}
+.csv-file-item .name {
+  flex: 1;
+  color: var(--text);
+  font-family: monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.csv-file-item .count {
+  color: var(--accent-2);
+  font-size: 0.72rem;
+}
+.csv-file-item .del {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.9rem;
+  padding: 2px 6px;
+}
+.csv-file-item .del:hover { color: var(--danger); }
+
+#csvUploadProgress {
+  margin-top: 12px;
+}
+
+/* =========================================
+   AI BATCH PROCESSING PANEL
+   ========================================= */
+.ai-input {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.ai-input .label-text {
+  font-size: 0.8rem;
+  color: var(--muted);
+  display: block;
+  margin-bottom: 4px;
+}
+.ai-input textarea,
+.ai-input input[type="text"] {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  resize: vertical;
+  min-height: 120px;
+}
+.ai-input textarea:focus,
+.ai-input input[type="text"]:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+.ai-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ai-status {
+  font-size: 0.82rem;
+  color: var(--muted);
+  margin: 10px 0;
+  min-height: 18px;
+}
+.ai-status.ok { color: var(--success); }
+.ai-status.error { color: var(--danger); }
+.ai-status.working { color: #f59e0b; }
+
+.ai-stats {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 8px 0;
+  font-size: 0.78rem;
+}
+.ai-stats .stat {
+  background: var(--panel-2);
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+.ai-stats .stat strong {
+  color: var(--accent-2);
+  font-size: 1rem;
+  display: block;
+}
+
+.ai-queue {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 600px;
+  overflow-y: auto;
+}
+
+.ai-group-header {
+  font-size: 0.75rem;
+  color: var(--accent-2);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+  margin-top: 12px;
+  font-weight: 700;
+}
+
+.ai-item {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  font-size: 0.82rem;
+  transition: border-color 0.2s;
+}
+.ai-item.status-done { border-color: rgba(34, 197, 94, 0.4); }
+.ai-item.status-error { border-color: rgba(239, 68, 68, 0.4); }
+.ai-item.status-remixing { border-color: rgba(245, 158, 11, 0.5); }
+.ai-item.status-published { border-color: rgba(124, 92, 255, 0.6); }
+
+.ai-item .ai-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ai-item .ai-group {
+  font-size: 0.68rem;
+  color: var(--accent-2);
+  background: rgba(0,212,255,0.1);
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.ai-item .ai-status-badge {
+  font-size: 0.68rem;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--border);
+  color: var(--muted);
+}
+.ai-item.status-done .ai-status-badge {
+  background: rgba(34, 197, 94, 0.2);
+  color: #4ade80;
+}
+.ai-item.status-error .ai-status-badge {
+  background: rgba(239, 68, 68, 0.2);
+  color: #fca5a5;
+}
+.ai-item.status-remixing .ai-status-badge {
+  background: rgba(245, 158, 11, 0.2);
+  color: #fcd34d;
+}
+.ai-item.status-published .ai-status-badge {
+  background: rgba(124, 92, 255, 0.2);
+  color: #a78bfa;
+}
+
+.ai-item .ai-url {
+  color: var(--muted);
+  font-size: 0.72rem;
+  word-break: break-all;
+  margin-bottom: 6px;
+  font-family: monospace;
+}
+
+.ai-item .ai-title {
+  font-weight: 700;
+  font-size: 0.85rem;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+
+.ai-item .ai-desc {
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin-bottom: 8px;
+  line-height: 1.4;
+}
+
+.ai-item .ai-result {
+  background: #0f1115;
+  padding: 10px;
+  border-radius: 8px;
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  color: var(--text);
+  max-height: 260px;
+  overflow-y: auto;
+  line-height: 1.5;
+  margin-top: 8px;
+}
+.ai-item .ai-result.loading {
+  color: var(--muted);
+  font-style: italic;
+}
+.ai-item .ai-result.error {
+  color: #fca5a5;
+}
+
+.ai-item .ai-actions-inline {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
