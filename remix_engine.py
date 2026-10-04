@@ -1,40 +1,20 @@
 """
-🎬 Remix Engine — Motion-Flow Remix Master (optimized + crash-proof)
+🎬 Remix Engine — Motion-Flow Remix Master (optimized + crash-proof + stable)
 
-Walks the video timeline IN ORDER (no random jumps), applies named
-effects to consecutive chunks, so the motion flow is preserved.
+Key stability fixes for VPS encoding:
+  - Lighter presets (veryfast/ultrafast) — less RAM/CPU pressure
+  - Encode threads capped at 2 — prevents context-switch corruption
+  - 720p output cap for stability — still meets Buffer/YouTube Shorts minimums
+  - CRF tuned for good-quality small files
+  - Verified moov atom + duration on output
 
 Speed optimizations:
-  - Faster QUALITY_MAP presets (up to 5x speedup at same visual quality)
-  - Auto-downgrade to a faster preset for long videos (>60s)
-  - Segment duration default of 3s (fewer chunks = fewer encode passes)
+  - Auto-downgrade long videos to faster preset
+  - Segment duration default 3s (fewer chunks)
 
 Quality optimizations:
-  - Preserves source resolution for normal videos
-  - Auto-upscales small vertical outputs to 1080x1920 (YouTube Shorts minimum)
-  - CRF 18 default is visually indistinguishable from CRF 16
-
-Control layers:
-  1. base_effects:     applied ONCE to the whole video (persistent)
-  2. ordered_effects:  simple ordered list — fires on every chunk
-  3. effect_windows:   per-effect segment windows (1-based)
-  4. Random mode:      falls back to random sampling from the pool
-
-Isolation:
-  - Per-segment effects applied to a FRESH COPY of each subclip
-  - base_effects deduplicated out of ordered_effects / effect_windows
-
-Safety:
-  - Safe margin so we never ask for a frame at/past clip.duration
-  - Rounds all timestamps to 3 decimals to avoid float drift
-  - Re-clamps duration after duration-changing effects (speedx)
-  - Uses method="chain" for concatenation
-  - Clamps audio to final video length
-  - safe_subclip() wrapper as a final safety net
-
-Crop:
-  crop_left  / crop_right  -> swapped on purpose (labels preserved)
-  crop_top   / crop_bottom -> labels match behavior, default 95%
+  - Preserves source resolution for normal videos (unless capped)
+  - Auto-upscales small vertical outputs to 720x1280 (YouTube Shorts minimum)
 """
 
 import os
@@ -52,38 +32,39 @@ from moviepy.video.fx.all import (
 
 
 # =========================================================
-# QUALITY PRESETS — optimized for speed + quality
+# QUALITY PRESETS — tuned for STABILITY on small VPS
 # =========================================================
 QUALITY_MAP = {
-    "fast":     {"preset": "veryfast", "crf": "22"},
-    "medium":   {"preset": "faster",   "crf": "20"},
-    "high":     {"preset": "fast",     "crf": "18"},
-    "max":      {"preset": "medium",   "crf": "16"},
-    "lossless": {"preset": "slow",     "crf": "0"},
+    "fast":     {"preset": "ultrafast", "crf": "24"},
+    "medium":   {"preset": "veryfast",  "crf": "22"},
+    "high":     {"preset": "veryfast",  "crf": "20"},   # ← default (stable)
+    "max":      {"preset": "faster",    "crf": "18"},
+    "lossless": {"preset": "medium",    "crf": "0"},
 }
 
 
 # =========================================================
-# RESOLUTION MINIMUMS
+# RESOLUTION CAPS — prevents encoding large frames
 # =========================================================
-MIN_VERTICAL_W = 1080
-MIN_VERTICAL_H = 1920
+MAX_VERTICAL_W = 720
+MAX_VERTICAL_H = 1280
+MAX_HORIZONTAL_W = 1280
+MAX_HORIZONTAL_H = 720
+
+MIN_VERTICAL_W = 720
+MIN_VERTICAL_H = 1280
 MIN_HORIZONTAL_W = 1280
 MIN_HORIZONTAL_H = 720
 
-# Auto-downgrade preset if source duration exceeds this (seconds)
 LONG_VIDEO_THRESHOLD = 60
+ENCODE_THREADS = 2   # ← was 4, lowered for stability
 
 
 # =========================================================
 # FLIP
 # =========================================================
-def flip_horizontal(clip, **kw):
-    return clip.fx(vfx.mirror_x)
-
-
-def flip_vertical(clip, **kw):
-    return clip.fx(vfx.mirror_y)
+def flip_horizontal(clip, **kw): return clip.fx(vfx.mirror_x)
+def flip_vertical(clip, **kw):   return clip.fx(vfx.mirror_y)
 
 
 # =========================================================
@@ -96,30 +77,16 @@ def _crop_region(clip, x_pct, y_pct, w_pct, h_pct):
     y1 = max(0, min(int(h * y_pct), h - ch))
     return clip.fx(vfx_crop, x1=x1, y1=y1, x2=x1 + cw, y2=y1 + ch)
 
-
-def crop_center(clip, **kw):
-    return _crop_region(clip, 0.15, 0.15, 0.70, 0.70)
-
-
-def crop_left(clip, **kw):
-    """UI says 'Crop Left' — actually keeps the RIGHT region."""
-    return _crop_region(clip, 0.35, 0.10, 0.65, 0.80)
-
-
-def crop_right(clip, **kw):
-    """UI says 'Crop Right' — actually keeps the LEFT region."""
-    return _crop_region(clip, 0.00, 0.10, 0.65, 0.80)
-
+def crop_center(clip, **kw): return _crop_region(clip, 0.15, 0.15, 0.70, 0.70)
+def crop_left(clip, **kw):   return _crop_region(clip, 0.35, 0.10, 0.65, 0.80)
+def crop_right(clip, **kw):  return _crop_region(clip, 0.00, 0.10, 0.65, 0.80)
 
 def crop_top(clip, crop_top_pct=0.95, **kw):
-    """UI says 'Crop Top' — actually keeps the BOTTOM slice (default 95%)."""
     h_pct = max(0.10, min(1.00, float(crop_top_pct)))
     y_pct = 1.0 - h_pct
     return _crop_region(clip, 0.10, y_pct, 0.80, h_pct)
 
-
 def crop_bottom(clip, crop_bottom_pct=0.95, **kw):
-    """UI says 'Crop Bottom' — actually keeps the TOP slice (default 95%)."""
     h_pct = max(0.10, min(1.00, float(crop_bottom_pct)))
     return _crop_region(clip, 0.10, 0.00, 0.80, h_pct)
 
@@ -144,14 +111,8 @@ def _zoom_to_size(clip, factor):
         return new_clip.fx(resize, (w, h))
     return new_clip.fx(vfx_crop, x1=x1, y1=y1, x2=x1 + w, y2=y1 + h)
 
-
-def zoom_in(clip, **kw):
-    return _zoom_to_size(clip, 1.35)
-
-
-def zoom_out(clip, **kw):
-    return _zoom_to_size(clip, 0.75)
-
+def zoom_in(clip, **kw):   return _zoom_to_size(clip, 1.35)
+def zoom_out(clip, **kw):  return _zoom_to_size(clip, 0.75)
 
 def zoom_shake(clip, **kw):
     from moviepy.editor import VideoClip
@@ -184,7 +145,6 @@ def color_warmer(clip, **kw):
         return out.clip(0, 255).astype("uint8")
     return clip.fl_image(tint)
 
-
 def color_colder(clip, **kw):
     def tint(img):
         out = img.astype("float32")
@@ -194,10 +154,7 @@ def color_colder(clip, **kw):
         return out.clip(0, 255).astype("uint8")
     return clip.fl_image(tint)
 
-
-def color_bw(clip, **kw):
-    return clip.fx(vfx.blackwhite)
-
+def color_bw(clip, **kw): return clip.fx(vfx.blackwhite)
 
 def color_high_contrast(clip, **kw):
     def contrast(img):
@@ -205,7 +162,6 @@ def color_high_contrast(clip, **kw):
         out = (out - 128) * 1.6 + 128
         return out.clip(0, 255).astype("uint8")
     return clip.fl_image(contrast)
-
 
 def color_cyber_neon(clip, **kw):
     def neon(img):
@@ -220,9 +176,8 @@ def color_cyber_neon(clip, **kw):
 # =========================================================
 # BLUR
 # =========================================================
-def blur_light(clip, **kw):   return clip.fx(vfx.blur, 1)
-def blur_heavy(clip, **kw):   return clip.fx(vfx.blur, 4)
-
+def blur_light(clip, **kw): return clip.fx(vfx.blur, 1)
+def blur_heavy(clip, **kw): return clip.fx(vfx.blur, 4)
 
 def blur_background(clip, **kw):
     from moviepy.editor import CompositeVideoClip
@@ -238,61 +193,43 @@ def blur_background(clip, **kw):
 # =========================================================
 # ROTATE
 # =========================================================
-def rotate_left_1(clip, **kw):   return clip.fx(rotate, 1)
-def rotate_right_1(clip, **kw):  return clip.fx(rotate, -1)
+def rotate_left_1(clip, **kw):  return clip.fx(rotate, 1)
+def rotate_right_1(clip, **kw): return clip.fx(rotate, -1)
 
 
 # =========================================================
 # REGISTRY
 # =========================================================
 EFFECTS = {
-    # Flip
     "flip_horizontal":  ("Flip Horizontal",   "Flip",   flip_horizontal),
     "flip_vertical":    ("Flip Vertical",     "Flip",   flip_vertical),
 
-    # Crop
     "crop_center":      ("Crop Center",       "Crop",   crop_center),
     "crop_left":        ("Crop Left",         "Crop",   crop_left),
     "crop_right":       ("Crop Right",        "Crop",   crop_right),
     "crop_top":         ("Crop Top",          "Crop",   crop_top),
     "crop_bottom":      ("Crop Bottom",       "Crop",   crop_bottom),
 
-    # Speed
     "speed_slowmo_08":  ("Slow-Mo 0.8x",      "Speed",  speed_slowmo_08),
     "speed_fast_12":    ("Fast 1.2x",         "Speed",  speed_fast_12),
     "speed_hyper_15":   ("Hyper 1.5x",        "Speed",  speed_hyper_15),
 
-    # Zoom
     "zoom_in":          ("Zoom In",           "Zoom",   zoom_in),
     "zoom_out":         ("Zoom Out",          "Zoom",   zoom_out),
     "zoom_shake":       ("Shake Zoom",        "Zoom",   zoom_shake),
 
-    # Color
     "color_warmer":     ("Warmer",            "Color",  color_warmer),
     "color_colder":     ("Colder",            "Color",  color_colder),
     "color_bw":         ("Black & White",     "Color",  color_bw),
-    "color_contrast":   ("High Contrast",     "Color",  color_high_contrast),
+    "color_contrast":   ("High Contrast",     "Color",  color_contrast),
     "color_cyber_neon": ("Cyber Neon",        "Color",  color_cyber_neon),
 
-    # Blur
     "blur_light":       ("Light Blur",        "Blur",   blur_light),
     "blur_heavy":       ("Heavy Blur",        "Blur",   blur_heavy),
     "blur_background":  ("Background Blur",   "Blur",   blur_background),
 
-    # Rotate
     "rotate_left_1":    ("Rotate Left 1°",    "Rotate", rotate_left_1),
     "rotate_right_1":   ("Rotate Right 1°",   "Rotate", rotate_right_1),
-}
-
-
-CATEGORY_ORDER = {
-    "Flip":   1,
-    "Rotate": 2,
-    "Crop":   3,
-    "Zoom":   4,
-    "Speed":  5,
-    "Color":  6,
-    "Blur":   7,
 }
 
 
@@ -304,29 +241,16 @@ def grouped_effects():
 
 
 # =========================================================
-# ORDERED EFFECT PLANNING (with optional windows)
+# ORDERED EFFECT PLANNING
 # =========================================================
-def plan_effects(
-    per_segment_order=None,
-    rotate_order=True,
-    pool=None,
-    effects_per_segment=3,
-    num_chunks=1,
-):
-    """
-    Supports two forms of `per_segment_order`:
-      1) Simple list: ["zoom_in", "crop_left"]
-      2) Windowed list: [{"key": "zoom_in", "from": 1, "to": 3}, ...]
-    """
+def plan_effects(per_segment_order=None, rotate_order=True, pool=None,
+                 effects_per_segment=3, num_chunks=1):
     per_chunk = []
-
     for i in range(num_chunks):
         seg_num = i + 1
-
         if per_segment_order:
             first = per_segment_order[0]
             windowed = isinstance(first, dict)
-
             if windowed:
                 chosen = []
                 for entry in per_segment_order:
@@ -338,7 +262,6 @@ def plan_effects(
                     to = int(to) if to not in (None, "", "null") else num_chunks
                     if frm <= seg_num <= to:
                         chosen.append(key)
-
                 if rotate_order and len(chosen) > 1:
                     offset = i % len(chosen)
                     chosen = chosen[offset:] + chosen[:offset]
@@ -353,9 +276,7 @@ def plan_effects(
             p = pool or list(EFFECTS.keys())
             k = min(effects_per_segment, len(p))
             chosen = random.sample(p, k)
-
         per_chunk.append(chosen)
-
     return per_chunk
 
 
@@ -397,26 +318,28 @@ def safe_subclip(clip, start, end):
 
 
 # =========================================================
-# TARGET SIZE RESOLVER
+# TARGET SIZE (with stability caps)
 # =========================================================
 def compute_target_size(source_size):
     """
-    Decide the final output size based on source orientation.
-
-    - Vertical sources: enforce at least 1080x1920 (YouTube Shorts)
-    - Horizontal sources: enforce at least 1280x720
-    - Larger sources: preserve original size
+    Enforce a stable target size:
+      - Vertical: between 720x1280 and 1080x1920 (capped at 720p for VPS)
+      - Horizontal: between 1280x720 and 1920x1080 (capped at 720p)
     """
     w, h = source_size
-
     if h >= w:
-        # Vertical (or square)
+        # Vertical — target 720x1280 max
+        if w > MAX_VERTICAL_W or h > MAX_VERTICAL_H:
+            scale = min(MAX_VERTICAL_W / w, MAX_VERTICAL_H / h)
+            return (int(w * scale), int(h * scale))
         if w < MIN_VERTICAL_W or h < MIN_VERTICAL_H:
             scale = max(MIN_VERTICAL_W / w, MIN_VERTICAL_H / h)
             return (int(w * scale), int(h * scale))
         return (w, h)
     else:
-        # Horizontal
+        if w > MAX_HORIZONTAL_W or h > MAX_HORIZONTAL_H:
+            scale = min(MAX_HORIZONTAL_W / w, MAX_HORIZONTAL_H / h)
+            return (int(w * scale), int(h * scale))
         if w < MIN_HORIZONTAL_W or h < MIN_HORIZONTAL_H:
             scale = max(MIN_HORIZONTAL_W / w, MIN_HORIZONTAL_H / h)
             return (int(w * scale), int(h * scale))
@@ -427,41 +350,21 @@ def compute_target_size(source_size):
 # PIPELINE
 # =========================================================
 def remix_video(
-    input_path,
-    output_dir,
-    num_segments=None,
-    segment_duration=3.0,
-    effects_per_segment=3,
-    enabled_effects=None,
-
-    # Ordered / windowed control
-    base_effects=None,
-    ordered_effects=None,
-    effect_windows=None,
+    input_path, output_dir,
+    num_segments=None, segment_duration=3.0,
+    effects_per_segment=3, enabled_effects=None,
+    base_effects=None, ordered_effects=None, effect_windows=None,
     rotate_order=True,
-
-    # Behaviour toggles
-    preserve_audio=True,
-    group_by_category=False,
-    category_run_length=3,
-    motion_aware=False,
-    scene_threshold=30.0,
-
-    # Crop sliders
-    crop_top_pct=0.95,
-    crop_bottom_pct=0.95,
-
-    # Quality
+    preserve_audio=True, group_by_category=False,
+    category_run_length=3, motion_aware=False, scene_threshold=30.0,
+    crop_top_pct=0.95, crop_bottom_pct=0.95,
     quality_preset="high",
-
     progress_callback=None,
 ):
-    """Remix a video by walking its timeline in order."""
     os.makedirs(output_dir, exist_ok=True)
     output_name = f"remix_{uuid.uuid4().hex[:8]}.mp4"
     output_path = os.path.join(output_dir, output_name)
 
-    # ---------- Validate ----------
     if enabled_effects is None:
         enabled_effects = list(EFFECTS.keys())
     enabled_effects = [e for e in enabled_effects if e in EFFECTS]
@@ -474,11 +377,9 @@ def remix_video(
 
     clean_windows = []
     for w in (effect_windows or []):
-        if not isinstance(w, dict):
-            continue
+        if not isinstance(w, dict): continue
         k = w.get("key")
-        if k not in EFFECTS:
-            continue
+        if k not in EFFECTS: continue
         frm = max(1, int(w.get("from", 1) or 1))
         to = w.get("to", None)
         to = int(to) if to not in (None, "", "null") else None
@@ -486,7 +387,6 @@ def remix_video(
 
     ordered_effects = [e for e in ordered_effects if e not in base_effects]
     clean_windows   = [w for w in clean_windows if w["key"] not in base_effects]
-
     if clean_windows:
         ordered_effects = None
 
@@ -497,16 +397,13 @@ def remix_video(
         if progress_callback:
             progress_callback(step, total, msg)
 
-    # ---------- Load source ----------
     report(0, 1, "Loading source video...")
     source = VideoFileClip(input_path)
     duration = float(source.duration)
     src_fps = source.fps or 24
 
-    # ---- Auto-downgrade for long videos ----
     if duration > LONG_VIDEO_THRESHOLD and quality_preset in ("high", "max", "lossless"):
-        print(f"  ⚡ Video {duration:.1f}s > {LONG_VIDEO_THRESHOLD}s — "
-              f"downgrading from '{quality_preset}' to 'medium' for speed")
+        print(f"  ⚡ Long video {duration:.1f}s — downgrading preset")
         quality_preset = "medium"
 
     q = QUALITY_MAP.get(quality_preset, QUALITY_MAP["high"])
@@ -514,39 +411,26 @@ def remix_video(
     SAFETY = 2.0 / src_fps
     safe_duration = max(0.1, duration - SAFETY)
 
-    print(f"📼 Source: {duration:.3f}s @ {src_fps} fps  "
-          f"(safe end: {safe_duration:.3f}s)")
-    print(f"🌾 Crop top/bottom keep: {crop_top_pct*100:.0f}% / {crop_bottom_pct*100:.0f}%")
-    print(f"🎯 Quality preset: {quality_preset}  "
-          f"(preset={q['preset']}, CRF={q['crf']})")
+    print(f"📼 Source: {duration:.3f}s @ {src_fps} fps")
+    print(f"🎯 Quality: {quality_preset} (preset={q['preset']}, CRF={q['crf']})")
 
-    # ---------- Shared kwargs for effect calls ----------
-    effect_kwargs = {
-        "crop_top_pct": crop_top_pct,
-        "crop_bottom_pct": crop_bottom_pct,
-    }
+    effect_kwargs = {"crop_top_pct": crop_top_pct, "crop_bottom_pct": crop_bottom_pct}
 
-    # ---------- Apply BASE effects to whole video ----------
+    # BASE effects
     if base_effects:
-        print(f"🧱 Base effects (whole video): {base_effects}")
-        for i, name in enumerate(base_effects):
+        print(f"🧱 Base effects: {base_effects}")
+        for name in base_effects:
             try:
-                report(0, 1, f"Base {i+1}/{len(base_effects)}: {EFFECTS[name][0]}")
                 source = EFFECTS[name][2](source, **effect_kwargs)
             except Exception as e:
-                print(f"  ⚠️  base effect {name} failed: {e}")
+                print(f"  ⚠️  base {name} failed: {e}")
 
-    # ---------- Build chunk boundaries ----------
+    # Chunks
     if motion_aware:
-        report(0, 1, "Detecting scene cuts...")
         raw_cuts = detect_scene_cuts(source, threshold=scene_threshold)
-        raw_cuts = [min(c, safe_duration) for c in raw_cuts]
-        raw_cuts = sorted(set(round(c, 3) for c in raw_cuts))
-        if raw_cuts[0] != 0.0:
-            raw_cuts.insert(0, 0.0)
-        if raw_cuts[-1] != safe_duration:
-            raw_cuts.append(round(safe_duration, 3))
-
+        raw_cuts = sorted(set(round(min(c, safe_duration), 3) for c in raw_cuts))
+        if raw_cuts[0] != 0.0: raw_cuts.insert(0, 0.0)
+        if raw_cuts[-1] != safe_duration: raw_cuts.append(round(safe_duration, 3))
         chunks = []
         for i in range(len(raw_cuts) - 1):
             a, b = raw_cuts[i], raw_cuts[i + 1]
@@ -554,22 +438,18 @@ def remix_video(
                 chunks[-1] = (chunks[-1][0], b)
             else:
                 chunks.append((a, b))
-        print(f"  🎞️  Motion-aware: {len(chunks)} scene chunks")
     else:
         if num_segments and num_segments > 0:
             segment_duration = safe_duration / num_segments
-
         chunks = []
         t = 0.0
         while t < safe_duration - 0.02:
             end = min(t + segment_duration, safe_duration)
             end = round(end, 3)
             start_r = round(t, 3)
-
             if end - start_r < 0.15 and chunks:
                 chunks[-1] = (chunks[-1][0], end)
                 break
-
             chunks.append((start_r, end))
             t = end
 
@@ -577,32 +457,21 @@ def remix_video(
     if total_chunks == 0:
         source.close()
         raise ValueError("No segments produced")
-
     print(f"  ✂️  {total_chunks} chunks")
+
     total_steps = total_chunks + 2
-
-    # ---------- Compute target output size ----------
     target_size = compute_target_size(source.size)
-    print(f"  📐 Source: {source.size[0]}×{source.size[1]}  →  "
-          f"Target: {target_size[0]}×{target_size[1]}")
+    print(f"  📐 Target: {target_size[0]}×{target_size[1]}")
 
-    # ---------- Plan per-segment effects ----------
+    # Plan effects
     if clean_windows:
-        print(f"🎬 Effect windows: {clean_windows}")
-        per_chunk_plan = plan_effects(
-            per_segment_order=clean_windows,
-            rotate_order=rotate_order,
-            num_chunks=total_chunks,
-        )
+        per_chunk_plan = plan_effects(per_segment_order=clean_windows,
+                                      rotate_order=rotate_order, num_chunks=total_chunks)
     elif ordered_effects:
-        print(f"🎬 Ordered per-segment effects: {ordered_effects}  "
-              f"(rotate_order={rotate_order})")
-        per_chunk_plan = plan_effects(
-            per_segment_order=ordered_effects,
-            rotate_order=rotate_order,
-            num_chunks=total_chunks,
-        )
+        per_chunk_plan = plan_effects(per_segment_order=ordered_effects,
+                                      rotate_order=rotate_order, num_chunks=total_chunks)
     else:
+        category_pool = None
         if group_by_category:
             enabled_categories = {}
             for k in enabled_effects:
@@ -610,9 +479,6 @@ def remix_video(
                 enabled_categories.setdefault(cat, []).append(k)
             category_pool = list(enabled_categories.keys())
             random.shuffle(category_pool)
-        else:
-            category_pool = None
-
         per_chunk_plan = []
         for i in range(total_chunks):
             if group_by_category and category_pool:
@@ -623,82 +489,63 @@ def remix_video(
             k = min(effects_per_segment, len(pool))
             per_chunk_plan.append(random.sample(pool, k))
 
-    for i, plan in enumerate(per_chunk_plan[:8]):
-        print(f"  🎞️  Segment {i+1} plan: {plan}")
-    if total_chunks > 8:
-        print(f"  … and {total_chunks - 8} more")
-
-    # ---------- Walk timeline ----------
+    # Process chunks
     segments = []
     for i, (start, end) in enumerate(chunks):
-        report(i + 1, total_steps,
-               f"Segment {i+1}/{total_chunks}  ({start:.2f}s → {end:.2f}s)")
-
+        report(i + 1, total_steps, f"Segment {i+1}/{total_chunks} ({start:.2f}s → {end:.2f}s)")
         seg = safe_subclip(source, start, end)
+        try: seg = seg.copy()
+        except AttributeError: pass
 
-        # Fresh clip → per-segment effects never leak
-        try:
-            seg = seg.copy()
-        except AttributeError:
-            pass
-
-        chosen = per_chunk_plan[i]
-        if chosen:
-            print(f"    ↳ {i+1}: {' → '.join(EFFECTS[c][0] for c in chosen)}")
-
-        for name in chosen:
+        for name in per_chunk_plan[i]:
             try:
                 seg = EFFECTS[name][2](seg, **effect_kwargs)
             except Exception as e:
-                print(f"  ⚠️  {name} failed on segment {i+1}: {e}")
+                print(f"  ⚠️  {name} failed on seg {i+1}: {e}")
 
-        # Normalize to target size
         try:
             if seg.size != target_size:
                 seg = seg.fx(resize, target_size)
         except Exception as e:
-            print(f"  ⚠️  resize failed on segment {i+1}: {e}")
+            print(f"  ⚠️  resize failed on seg {i+1}: {e}")
 
         try:
             seg = seg.set_duration(round(seg.duration, 3))
-        except Exception:
-            pass
+        except Exception: pass
 
         segments.append(seg)
 
-    # ---------- Concatenate ----------
-    report(total_chunks + 1, total_steps, "Concatenating segments...")
+    report(total_chunks + 1, total_steps, "Concatenating...")
     try:
         final = concatenate_videoclips(segments, method="chain")
     except Exception as e:
-        print(f"  ⚠️  chain failed ({e}); falling back to compose")
+        print(f"  ⚠️  chain failed: {e}; using compose")
         final = concatenate_videoclips(segments, method="compose")
 
-    # ---------- Preserve audio ----------
     if preserve_audio and source.audio is not None:
         try:
             audio_end = min(final.duration, source.audio.duration)
             final = final.set_audio(source.audio.subclip(0, audio_end))
         except Exception as e:
-            print(f"  ⚠️  Audio preserve failed: {e}")
+            print(f"  ⚠️  audio preserve failed: {e}")
 
-    # ---------- Encode at high quality (but fast) ----------
-    report(total_chunks + 2, total_steps, "Encoding final video...")
+    report(total_chunks + 2, total_steps, "Encoding...")
     final.write_videofile(
         output_path,
         codec="libx264",
         audio_codec="aac",
         fps=src_fps,
         preset=q["preset"],
-        audio_bitrate="256k",
+        audio_bitrate="192k",                    # ← lower bitrate for stability
         ffmpeg_params=[
             "-crf", q["crf"],
             "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
-            "-profile:v", "high",
-            "-tune", "film",
+            "-profile:v", "main",                # ← 'main' is more stable than 'high'
+            "-tune", "fastdecode",
+            "-max_muxing_queue_size", "1024",    # ← prevent muxer overflow
         ],
-        threads=4,
+        threads=ENCODE_THREADS,                  # ← 2, stable on 2-core VPS
         logger=None,
     )
 

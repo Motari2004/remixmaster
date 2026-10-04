@@ -1,7 +1,7 @@
 """
 🎬 Remix Master — Flask backend (VPS)
 
-Server-side batch worker + persistent progress tracking + AI + Buffer.
+Server-side batch worker + persistent progress + AI + Buffer + stability fixes.
 """
 
 import os
@@ -12,6 +12,7 @@ import json
 import glob
 import csv
 import shutil
+import subprocess
 import threading
 from urllib.parse import urlparse
 from flask import (
@@ -140,7 +141,7 @@ def _apply_gemini_key_to_engine():
         if new_key and new_key != ai_engine.GEMINI_API_KEY:
             ai_engine.GEMINI_API_KEY = new_key
             ai_engine._model = None
-            print(f"  🔑 Gemini key updated (len={len(new_key)})")
+            print(f"  🔑 Gemini key updated")
     except Exception as e:
         print(f"  ⚠️  Gemini key refresh failed: {e}")
 
@@ -169,7 +170,7 @@ def _save_progress(data):
         os.replace(tmp, PROGRESS_FILE)
         return True
     except Exception as e:
-        print(f"  ⚠️  Could not write progress file: {e}")
+        print(f"  ⚠️  Could not write progress: {e}")
         return False
 
 
@@ -178,10 +179,8 @@ def _init_group_progress(group_name, urls):
         progress = _load_progress()
         if group_name not in progress:
             progress[group_name] = {
-                "status": "pending",
-                "processed_urls": [],
-                "pending_urls": list(urls),
-                "last_update": None,
+                "status": "pending", "processed_urls": [],
+                "pending_urls": list(urls), "last_update": None,
             }
         else:
             entry = progress[group_name]
@@ -203,10 +202,8 @@ def _mark_url_processed(group_name, url, success=True):
         progress = _load_progress()
         if group_name not in progress:
             progress[group_name] = {
-                "status": "pending",
-                "processed_urls": [],
-                "pending_urls": [],
-                "last_update": None,
+                "status": "pending", "processed_urls": [],
+                "pending_urls": [], "last_update": None,
             }
         entry = progress[group_name]
         if url in entry["pending_urls"]:
@@ -219,21 +216,21 @@ def _mark_url_processed(group_name, url, success=True):
 
 
 # =========================================================
-# BATCH WORKER (server-side)
+# ENCODE LOCK — prevents concurrent encodes (stability)
+# =========================================================
+ENCODE_LOCK = threading.Lock()
+
+
+# =========================================================
+# BATCH WORKER
 # =========================================================
 BATCH_STATE = {
-    "running": False,
-    "abort": False,
-    "current_group": None,
-    "current_url": None,
-    "groups_total": 0,
-    "groups_done": 0,
-    "items_total": 0,
-    "items_done": 0,
-    "cooldown_until": 0,
-    "started_at": 0,
-    "last_message": "",
-    "last_error": None,
+    "running": False, "abort": False,
+    "current_group": None, "current_url": None,
+    "groups_total": 0, "groups_done": 0,
+    "items_total": 0, "items_done": 0,
+    "cooldown_until": 0, "started_at": 0,
+    "last_message": "", "last_error": None,
     "groups_list": [],
 }
 BATCH_LOCK = threading.Lock()
@@ -250,13 +247,36 @@ def _batch_status_snapshot():
     return s
 
 
+def _verify_output(output_path):
+    """Verify the encoded MP4 has a valid moov atom and duration."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error",
+             "-show_entries", "format=duration,size",
+             "-of", "csv=p=0", output_path],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            return False, f"ffprobe rc={result.returncode}: {result.stderr[:200]}"
+        parts = result.stdout.strip().split(",")
+        if len(parts) < 2:
+            return False, f"unexpected ffprobe output: {result.stdout[:100]}"
+        dur = float(parts[0])
+        size = int(parts[1])
+        if dur < 0.5:
+            return False, f"output duration too short: {dur}s"
+        if size < 50000:
+            return False, f"output too small: {size} bytes"
+        return True, f"OK ({dur:.2f}s, {size/1024/1024:.2f} MB)"
+    except Exception as e:
+        return False, f"verification error: {e}"
+
+
 def _run_batch_worker(groups, cooldown_seconds):
-    """Background thread that processes groups sequentially."""
     try:
         for gi, group_name in enumerate(groups):
             with BATCH_LOCK:
-                if BATCH_STATE["abort"]:
-                    break
+                if BATCH_STATE["abort"]: break
                 BATCH_STATE["current_group"] = group_name
                 BATCH_STATE["last_message"] = f"Loading {group_name}"
 
@@ -273,8 +293,6 @@ def _run_batch_worker(groups, cooldown_seconds):
             progress = _load_progress()
             entry = progress.get(group_name, {})
             pending = list(entry.get("pending_urls", []))
-
-            # Map URL -> title/description for AI
             url_meta = {it["url"]: it for it in items}
 
             with BATCH_LOCK:
@@ -284,8 +302,7 @@ def _run_batch_worker(groups, cooldown_seconds):
 
             for i, url in enumerate(pending):
                 with BATCH_LOCK:
-                    if BATCH_STATE["abort"]:
-                        break
+                    if BATCH_STATE["abort"]: break
                     BATCH_STATE["current_url"] = url
                     BATCH_STATE["last_message"] = f"{group_name} [{i+1}/{len(pending)}]"
 
@@ -298,8 +315,10 @@ def _run_batch_worker(groups, cooldown_seconds):
                     print(f"  ❌ Batch item failed: {url} — {e}")
                     try:
                         _mark_url_processed(group_name, url, success=False)
-                    except Exception:
-                        pass
+                    except Exception: pass
+
+                # Pause between items — lets the encoder fully release resources
+                time.sleep(3)
 
                 with BATCH_LOCK:
                     BATCH_STATE["items_done"] += 1
@@ -308,14 +327,12 @@ def _run_batch_worker(groups, cooldown_seconds):
                 BATCH_STATE["groups_done"] += 1
                 BATCH_STATE["current_url"] = None
 
-            # Cooldown between groups
             if gi < len(groups) - 1 and not BATCH_STATE["abort"]:
                 with BATCH_LOCK:
                     BATCH_STATE["cooldown_until"] = time.time() + cooldown_seconds
                     BATCH_STATE["last_message"] = f"Cooldown after {group_name}"
                 while time.time() < BATCH_STATE["cooldown_until"]:
-                    if BATCH_STATE["abort"]:
-                        break
+                    if BATCH_STATE["abort"]: break
                     time.sleep(2)
 
         with BATCH_LOCK:
@@ -333,22 +350,16 @@ def _run_batch_worker(groups, cooldown_seconds):
 
 
 def _process_single_url(url, group_name, raw_title="", raw_desc=""):
-    """
-    Process one URL: fetch → remix → publish. Blocking.
-    Called from the batch worker thread.
-    """
-    # 1. Fetch
     with BATCH_LOCK:
         BATCH_STATE["last_message"] = f"Fetching {url[:40]}…"
     fpath, base_name = download_url_to_upload_dir(url)
 
-    # 2. AI reformat (if available)
     ai_title = raw_title or "Remix Master Video"
     ai_caption = raw_desc or ai_title
     try:
         if ai_available() and (raw_title or raw_desc):
             with BATCH_LOCK:
-                BATCH_STATE["last_message"] = f"AI reformat {url[:40]}…"
+                BATCH_STATE["last_message"] = f"AI {url[:40]}…"
             raw = regenerate_for_tinytoon(raw_title, raw_desc)
             parsed = parse_ai_response(raw)
             ai_title = parsed.get("title") or ai_title
@@ -356,7 +367,6 @@ def _process_single_url(url, group_name, raw_title="", raw_desc=""):
     except Exception as e:
         print(f"  ⚠️  AI skipped for {url[:40]}: {e}")
 
-    # 3. Remix (run synchronously)
     with BATCH_LOCK:
         BATCH_STATE["last_message"] = f"Remixing {url[:40]}…"
 
@@ -375,15 +385,20 @@ def _process_single_url(url, group_name, raw_title="", raw_desc=""):
     if not job or job.get("status") != "done":
         raise RuntimeError(f"Remix failed: {job.get('message') if job else 'unknown'}")
 
-    # 4. Publish to Buffer
+    # Verify the output file is intact
+    out_path = os.path.join(OUTPUT_DIR, job["output"])
+    ok, msg = _verify_output(out_path)
+    if not ok:
+        raise RuntimeError(f"Corrupt output: {msg}")
+    print(f"  ✅ Verified output: {msg}")
+
     with BATCH_LOCK:
         BATCH_STATE["last_message"] = f"Publishing {url[:40]}…"
     try:
         _publish_to_buffer_internal(job["output"], ai_title, ai_caption)
-        print(f"  ✅ Batch: {group_name} — {url[:60]}")
+        print(f"  ✅ Published: {group_name} — {url[:60]}")
     except Exception as e:
         print(f"  ⚠️  Publish failed for {url[:60]}: {e}")
-        # Don't fail the whole item — mark it done anyway
 
 
 def _publish_to_buffer_internal(output_filename, title, caption):
@@ -408,7 +423,14 @@ def _publish_to_buffer_internal(output_filename, title, caption):
             "schedulingType": "automatic",
             "mode": "addToQueue",
             "assets": [{"video": {"url": video_url}}],
-            "metadata": {"youtube": {"title": title, "categoryId": "22", "privacy": "public"}},
+            "metadata": {
+                "youtube": {
+                    "title": title,
+                    "categoryId": "24",       # Entertainment
+                    "privacy": "public",
+                    "madeForKids": True,       # ✅ COPPA
+                }
+            },
         }
     }
     resp = requests.post(
@@ -517,10 +539,8 @@ def _require_remix_engine():
 def _get_buffer_youtube_channel_id():
     api_key = _get_setting("BUFFER_API_KEY", BUFFER_API_KEY)
     channel_id_env = _get_setting("BUFFER_YOUTUBE_CHANNEL_ID", BUFFER_YOUTUBE_CHANNEL_ID)
-    if not api_key:
-        raise ValueError("BUFFER_API_KEY is not set.")
-    if channel_id_env:
-        return channel_id_env
+    if not api_key: raise ValueError("BUFFER_API_KEY is not set.")
+    if channel_id_env: return channel_id_env
 
     resp = requests.post(BUFFER_API_URL,
         json={"query": "query { account { organizations { id } } }"},
@@ -620,8 +640,7 @@ def parse_options(src):
 # RESOLVER + DOWNLOAD
 # =========================================================
 def resolve_via_external_api(video_url):
-    if requests is None:
-        raise ValueError("requests not installed")
+    if requests is None: raise ValueError("requests not installed")
     print(f"  🔗 Resolving via {DOWNLOAD_API_URL}")
     try:
         r = requests.post(DOWNLOAD_API_URL,
@@ -631,29 +650,22 @@ def resolve_via_external_api(video_url):
         raise ValueError(f"Resolver unreachable: {e}")
     if not r.ok:
         raise ValueError(f"Resolver HTTP {r.status_code}: {r.text[:200]}")
-    try:
-        data = r.json()
-    except Exception:
-        raise ValueError(f"Resolver non-JSON: {r.text[:200]}")
+    try: data = r.json()
+    except Exception: raise ValueError(f"Resolver non-JSON: {r.text[:200]}")
     if data.get("success") is False and data.get("error"):
         raise ValueError(f"Resolver error: {data['error']}")
     direct = (data.get("download_url") or data.get("url") or data.get("direct_url")
               or (data.get("data") or {}).get("download_url"))
-    if not direct:
-        raise ValueError(f"No download_url in resolver response")
-    print(f"  ✅ Resolved: {direct[:80]}...")
+    if not direct: raise ValueError("No download_url in resolver response")
     return direct
 
 
 def download_url_to_upload_dir(url):
-    if requests is None:
-        raise ValueError("requests not installed")
+    if requests is None: raise ValueError("requests not installed")
     if not url.startswith(("http://", "https://")):
         raise ValueError("URL must start with http:// or https://")
     if not looks_like_direct_url(url):
         url = resolve_via_external_api(url)
-    else:
-        print(f"  ⚡ Direct URL")
 
     parsed = urlparse(url)
     base_name = os.path.basename(parsed.path) or "remote_video"
@@ -674,7 +686,7 @@ def download_url_to_upload_dir(url):
                     if total > MAX_BYTES:
                         f.close(); os.remove(fpath)
                         raise ValueError("File exceeds 500 MB")
-        print(f"  💾 Saved {fpath} ({total/1024/1024:.2f} MB)")
+        print(f"  💾 Downloaded {total/1024/1024:.2f} MB")
         return fpath, base_name
     except requests.exceptions.RequestException as e:
         if os.path.exists(fpath):
@@ -723,7 +735,6 @@ def _cleanup_old_outputs():
                 fpath = os.path.join(OUTPUT_DIR, fname)
                 if os.path.isfile(fpath) and (now - os.path.getmtime(fpath)) > OUTPUT_TTL_SECONDS:
                     os.remove(fpath)
-                    print(f"  🧹 Removed {fname}")
         except Exception as e:
             print(f"  ⚠️  Cleanup error: {e}")
 
@@ -756,8 +767,7 @@ def _load_csv_group(csv_path):
             title_col = next((n for n in fieldnames if n in ("title", "video_title", "name")), None)
             desc_col = next((n for n in fieldnames if n in ("description", "video_description", "desc", "caption")), None)
 
-            if not id_col and not url_col:
-                return items
+            if not id_col and not url_col: return items
 
             f.seek(0)
             reader = csv.DictReader(f)
@@ -789,8 +799,7 @@ def api_groups():
         files = sorted(
             glob.glob(os.path.join(GROUPS_DIR, "*.csv")),
             key=lambda p: (int("".join(c for c in os.path.basename(p) if c.isdigit()) or 0),
-                           os.path.basename(p))
-        )
+                           os.path.basename(p)))
         groups = []
         for path in files:
             name = os.path.splitext(os.path.basename(path))[0]
@@ -823,16 +832,15 @@ def upload_csv():
     files = request.files.getlist("files")
     if not files:
         return jsonify(success=False, error="No files selected"), 400
-
     os.makedirs(GROUPS_DIR, exist_ok=True)
     uploaded, failed = [], []
     for f in files:
         if not f or not f.filename: continue
         if not f.filename.lower().endswith(".csv"):
-            failed.append({"name": f.filename, "error": "Not a CSV"}); continue
+            failed.append({"name": f.filename, "error": "Not CSV"}); continue
         safe = secure_filename(f.filename)
         if not safe:
-            failed.append({"name": f.filename, "error": "Invalid filename"}); continue
+            failed.append({"name": f.filename, "error": "Invalid name"}); continue
         dest = os.path.join(GROUPS_DIR, safe)
         try:
             f.save(dest)
@@ -841,7 +849,6 @@ def upload_csv():
             uploaded.append(safe)
         except Exception as e:
             failed.append({"name": f.filename, "error": str(e)})
-
     return jsonify(success=True, uploaded=uploaded, failed=failed)
 
 
@@ -871,16 +878,9 @@ def api_progress():
     total_urls = sum(len(g.get("processed_urls", [])) + len(g.get("pending_urls", []))
                      for g in progress.values())
     processed_urls = sum(len(g.get("processed_urls", [])) for g in progress.values())
-    return jsonify(
-        success=True,
-        total_groups=total_groups,
-        done_groups=done_groups,
-        in_progress_groups=in_progress,
-        pending_groups=total_groups - done_groups - in_progress,
-        total_urls=total_urls,
-        processed_urls=processed_urls,
-        groups=progress,
-    )
+    return jsonify(success=True, total_groups=total_groups, done_groups=done_groups,
+                   in_progress_groups=in_progress, pending_groups=total_groups - done_groups - in_progress,
+                   total_urls=total_urls, processed_urls=processed_urls, groups=progress)
 
 
 @app.route("/api/progress/<group_name>")
@@ -921,12 +921,11 @@ def api_progress_reset_group(group_name):
 
 
 # =========================================================
-# API — BATCH (server-side)
+# API — BATCH
 # =========================================================
 @app.route("/api/batch/start", methods=["POST"])
 def api_batch_start():
     global BATCH_THREAD
-
     with BATCH_LOCK:
         if BATCH_STATE["running"]:
             return jsonify(error="Batch already running"), 400
@@ -939,19 +938,15 @@ def api_batch_start():
     all_groups = sorted(
         [os.path.splitext(os.path.basename(p))[0]
          for p in glob.glob(os.path.join(GROUPS_DIR, "*.csv"))],
-        key=lambda x: (int("".join(c for c in x if c.isdigit()) or 0), x),
-    )
+        key=lambda x: (int("".join(c for c in x if c.isdigit()) or 0), x))
 
     if skip_published:
         progress = _load_progress()
-        all_groups = [g for g in all_groups
-                      if progress.get(g, {}).get("status") != "done"]
+        all_groups = [g for g in all_groups if progress.get(g, {}).get("status") != "done"]
 
     if groups_per_session:
-        try:
-            all_groups = all_groups[:int(groups_per_session)]
-        except (TypeError, ValueError):
-            pass
+        try: all_groups = all_groups[:int(groups_per_session)]
+        except (TypeError, ValueError): pass
 
     if not all_groups:
         return jsonify(error="No groups to process"), 400
@@ -967,13 +962,9 @@ def api_batch_start():
             "groups_list": list(all_groups),
         })
 
-    BATCH_THREAD = threading.Thread(
-        target=_run_batch_worker,
-        args=(all_groups, cooldown_min * 60),
-        daemon=True,
-    )
+    BATCH_THREAD = threading.Thread(target=_run_batch_worker,
+                                    args=(all_groups, cooldown_min * 60), daemon=True)
     BATCH_THREAD.start()
-
     return jsonify(success=True, groups=all_groups, cooldown_minutes=cooldown_min)
 
 
@@ -1004,8 +995,7 @@ def api_batch_reset():
             "groups_total": 0, "groups_done": 0,
             "items_total": 0, "items_done": 0,
             "cooldown_until": 0, "started_at": 0,
-            "last_message": "", "last_error": None,
-            "groups_list": [],
+            "last_message": "", "last_error": None, "groups_list": [],
         }
     return jsonify(success=True)
 
@@ -1023,18 +1013,16 @@ def ai_status():
 def ai_reformat():
     _apply_gemini_key_to_engine()
     if not ai_available():
-        return jsonify(error="AI not configured. Set GEMINI_API_KEY in settings."), 503
+        return jsonify(error="AI not configured."), 503
     data = request.get_json(silent=True) or {}
     title = (data.get("title") or "").strip()
     description = (data.get("description") or "").strip()
-    if not title:
-        return jsonify(error="Title is required"), 400
+    if not title: return jsonify(error="Title required"), 400
     try:
         raw = regenerate_for_tinytoon(title, description)
         parsed = parse_ai_response(raw)
         return jsonify(success=True, raw=raw, parsed=parsed)
     except Exception as e:
-        print(f"  ⚠️  AI reformat failed: {e}")
         return jsonify(error=str(e)), 500
 
 
@@ -1089,11 +1077,11 @@ def api_settings_test():
         if not ai_engine._GENAI_AVAILABLE:
             results["ai"] = {"ok": False, "message": "google-generativeai not installed"}
         elif not key:
-            results["ai"] = {"ok": False, "message": "Gemini API key not set"}
+            results["ai"] = {"ok": False, "message": "Gemini key not set"}
         else:
             try:
                 raw = ai_engine.regenerate_for_tinytoon("Test Title", "Test description")
-                results["ai"] = {"ok": True, "message": f"OK — got {len(raw)} chars"}
+                results["ai"] = {"ok": True, "message": f"OK ({len(raw)} chars)"}
             except Exception as e:
                 results["ai"] = {"ok": False, "message": str(e)}
     except Exception as e:
@@ -1102,7 +1090,7 @@ def api_settings_test():
 
 
 # =========================================================
-# JOB WORKER
+# JOB WORKER (with retry + encode lock + verification)
 # =========================================================
 def run_job(job_id, input_path, options, group_name=None, source_url=None):
     job = JOBS[job_id]
@@ -1114,26 +1102,54 @@ def run_job(job_id, input_path, options, group_name=None, source_url=None):
                 job["message"] = msg
                 job["progress"] = int(100 * step / max(1, total))
 
-        output_name = remix_video(
-            input_path=input_path, output_dir=OUTPUT_DIR,
-            num_segments=options["num_segments"],
-            segment_duration=options["segment_duration"],
-            effects_per_segment=options["effects_per_segment"],
-            enabled_effects=options["enabled_effects"],
-            base_effects=options["base_effects"],
-            ordered_effects=options["ordered_effects"],
-            effect_windows=options["effect_windows"],
-            rotate_order=options["rotate_order"],
-            preserve_audio=options["preserve_audio"],
-            group_by_category=options["group_by_category"],
-            category_run_length=options["category_run_length"],
-            motion_aware=options["motion_aware"],
-            scene_threshold=options["scene_threshold"],
-            crop_top_pct=options["crop_top_pct"],
-            crop_bottom_pct=options["crop_bottom_pct"],
-            quality_preset=options["quality_preset"],
-            progress_callback=cb,
-        )
+        output_name = None
+        last_error = None
+
+        # Try up to 2 times with encode lock
+        for attempt in range(2):
+            try:
+                with ENCODE_LOCK:
+                    print(f"  🔒 Encode lock acquired (attempt {attempt+1})")
+                    output_name = remix_video(
+                        input_path=input_path, output_dir=OUTPUT_DIR,
+                        num_segments=options["num_segments"],
+                        segment_duration=options["segment_duration"],
+                        effects_per_segment=options["effects_per_segment"],
+                        enabled_effects=options["enabled_effects"],
+                        base_effects=options["base_effects"],
+                        ordered_effects=options["ordered_effects"],
+                        effect_windows=options["effect_windows"],
+                        rotate_order=options["rotate_order"],
+                        preserve_audio=options["preserve_audio"],
+                        group_by_category=options["group_by_category"],
+                        category_run_length=options["category_run_length"],
+                        motion_aware=options["motion_aware"],
+                        scene_threshold=options["scene_threshold"],
+                        crop_top_pct=options["crop_top_pct"],
+                        crop_bottom_pct=options["crop_bottom_pct"],
+                        quality_preset=options["quality_preset"],
+                        progress_callback=cb,
+                    )
+                    print(f"  🔓 Encode lock released")
+
+                # Verify output
+                out_path = os.path.join(OUTPUT_DIR, output_name)
+                ok, msg = _verify_output(out_path)
+                if not ok:
+                    raise RuntimeError(f"Output verification failed: {msg}")
+                print(f"  ✅ Verified: {msg}")
+                break   # success
+            except Exception as e:
+                last_error = e
+                print(f"  ⚠️  Attempt {attempt+1} failed: {e}")
+                if output_name:
+                    try: os.remove(os.path.join(OUTPUT_DIR, output_name))
+                    except Exception: pass
+                    output_name = None
+                time.sleep(5)
+
+        if not output_name:
+            raise last_error or RuntimeError("Remix failed after retries")
 
         try:
             original_name = f"original_{job_id}.mp4"
@@ -1154,7 +1170,6 @@ def run_job(job_id, input_path, options, group_name=None, source_url=None):
         if group_name and source_url:
             try:
                 _mark_url_processed(group_name, source_url, success=True)
-                print(f"  ✅ Progress: {group_name} / {source_url[:60]}")
             except Exception as e:
                 print(f"  ⚠️  Progress mark failed: {e}")
     except Exception as e:
@@ -1163,8 +1178,7 @@ def run_job(job_id, input_path, options, group_name=None, source_url=None):
             job["message"] = f"Error: {e}"
         print("JOB ERROR:", e)
         if group_name and source_url:
-            try:
-                _mark_url_processed(group_name, source_url, success=False)
+            try: _mark_url_processed(group_name, source_url, success=False)
             except Exception: pass
     finally:
         try:
@@ -1199,7 +1213,8 @@ def index():
 
 @app.route("/healthz")
 def healthz():
-    return jsonify(status="ok", service="remix-master", remix_engine_ok=(_REMIX_IMPORT_ERROR is None)), 200
+    return jsonify(status="ok", service="remix-master",
+                   remix_engine_ok=(_REMIX_IMPORT_ERROR is None)), 200
 
 
 @app.route("/api/effects")
@@ -1213,7 +1228,7 @@ def api_effects():
 @app.route("/stage_upload", methods=["POST"])
 def stage_upload():
     _require_remix_engine()
-    if "video" not in request.files: return jsonify(error="No file part"), 400
+    if "video" not in request.files: return jsonify(error="No file"), 400
     file = request.files["video"]
     if not file or not file.filename: return jsonify(error="No file"), 400
     if not allowed_file(file.filename): return jsonify(error="Unsupported"), 400
@@ -1294,31 +1309,26 @@ def download_attach(filename):
 
 @app.route("/api/fetch_metadata", methods=["POST"])
 def fetch_metadata():
-    if requests is None:
-        return jsonify(error="requests not installed"), 500
+    if requests is None: return jsonify(error="requests not installed"), 500
     url = ""
     if request.form.get("url"):
         url = request.form["url"].strip()
     else:
         data = request.get_json(silent=True) or {}
         url = (data.get("url") or "").strip()
-    if not url:
-        return jsonify(error="No URL provided"), 400
+    if not url: return jsonify(error="No URL"), 400
     title, description = "", ""
     try:
-        oembed_url = f"https://www.youtube.com/oembed?url={url}&format=json"
-        r = requests.get(oembed_url, timeout=15)
+        r = requests.get(f"https://www.youtube.com/oembed?url={url}&format=json", timeout=15)
         if r.ok:
             o = r.json()
             title = o.get("title", "")
-            description = f"By {o.get('author_name', '')}" if o.get("author_name") else ""
+            if o.get("author_name"):
+                description = f"By {o['author_name']}"
     except Exception: pass
     return jsonify(success=True, title=title, description=description, url=url)
 
 
-# =========================================================
-# PUBLISH VIA BUFFER
-# =========================================================
 @app.route("/publish_to_youtube/<job_id>", methods=["POST"])
 def publish_to_youtube(job_id):
     job = JOBS.get(job_id)
