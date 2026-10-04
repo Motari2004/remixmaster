@@ -44,7 +44,11 @@ except ImportError:
     requests = None
 
 try:
-    from ai_engine import regenerate_for_tinytoon, parse_ai_response, is_available as ai_available
+    from ai_engine import (
+        regenerate_for_tinytoon,
+        parse_ai_response,
+        is_available as ai_available,
+    )
 except ImportError:
     print("⚠️  ai_engine not found — AI features disabled")
     def regenerate_for_tinytoon(t, d):
@@ -201,6 +205,7 @@ def _probe_duration(fpath):
 
 
 def public_url(path: str) -> str:
+    """Build an absolute URL for the given path."""
     if PUBLIC_API_BASE:
         return f"{PUBLIC_API_BASE}{path}"
     try:
@@ -582,7 +587,10 @@ def _load_csv_group(csv_path):
 def api_groups():
     try:
         pattern = os.path.join(GROUPS_DIR, "*.csv")
-        files = sorted(glob.glob(pattern), key=lambda p: (
+        all_files = glob.glob(pattern)
+        print(f"  📂 Found {len(all_files)} .csv files in {GROUPS_DIR}")
+
+        files = sorted(all_files, key=lambda p: (
             int("".join(c for c in os.path.basename(p) if c.isdigit()) or 0),
             os.path.basename(p)
         ))
