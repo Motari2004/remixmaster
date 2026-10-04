@@ -4,9 +4,6 @@
 Reads the API key from:
   1. settings.json (set via UI) — highest priority
   2. GEMINI_API_KEY env var — fallback
-
-Requires:
-  pip install google-generativeai
 """
 
 import os
@@ -20,9 +17,6 @@ except ImportError:
     print("⚠️  google-generativeai not installed. Run: pip install google-generativeai")
 
 
-# =========================================================
-# CONFIG
-# =========================================================
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 
@@ -30,7 +24,6 @@ _model = None
 
 
 def _settings_path():
-    """Path to settings.json (respects DATA_DIR)."""
     return os.path.join(
         os.environ.get("DATA_DIR", os.path.dirname(os.path.abspath(__file__))),
         "settings.json",
@@ -38,7 +31,6 @@ def _settings_path():
 
 
 def _read_key_from_settings():
-    """Return the key saved via the UI (or None)."""
     try:
         path = _settings_path()
         if os.path.exists(path):
@@ -52,30 +44,16 @@ def _read_key_from_settings():
 
 
 def _resolve_key():
-    """Key priority: settings.json > env var > module global."""
     return _read_key_from_settings() or GEMINI_API_KEY
 
 
-# =========================================================
-# MODEL INIT
-# =========================================================
 def _get_model():
-    """Lazy-init the Gemini model. Re-reads the key each time it changes."""
     global _model
-
     key = _resolve_key()
-
     if not _GENAI_AVAILABLE:
-        raise RuntimeError(
-            "google-generativeai is not installed. "
-            "Run: pip install google-generativeai"
-        )
+        raise RuntimeError("google-generativeai not installed")
     if not key:
-        raise RuntimeError(
-            "Gemini API key not set. Add it in the UI Settings panel."
-        )
-
-    # Rebuild if the key changed
+        raise RuntimeError("Gemini API key not set. Add it in the UI Settings panel.")
     if _model is None or key != getattr(_model, "_key", None):
         genai.configure(api_key=key)
         _model = genai.GenerativeModel(GEMINI_MODEL_NAME)
@@ -83,14 +61,10 @@ def _get_model():
             _model._key = key
         except Exception:
             pass
-        print(f"  ✅ Gemini model ready: {GEMINI_MODEL_NAME} (key …{key[-4:]})")
-
+        print(f"  ✅ Gemini ready: {GEMINI_MODEL_NAME} (key …{key[-4:]})")
     return _model
 
 
-# =========================================================
-# SYSTEM PROMPT
-# =========================================================
 SYSTEM_PROMPT = """You are a content formatter for TinyToon World, a kids YouTube channel.
 
 CHANNEL LINK: https://www.youtube.com/channel/UCas9RSTUxS0x0NtNbV-Y7JQ
@@ -129,10 +103,7 @@ RULES:
 """
 
 
-# =========================================================
-# CORE
-# =========================================================
-def regenerate_for_tinytoon(title: str, description: str) -> str:
+def regenerate_for_tinytoon(title, description):
     model = _get_model()
     prompt = f"""{SYSTEM_PROMPT}
 
@@ -153,19 +124,18 @@ DESCRIPTION: {description}"""
             pass
 
     if not text:
-        raise RuntimeError("Gemini returned an empty response (possibly blocked by safety filters).")
-
+        raise RuntimeError("Gemini returned an empty response (possibly blocked).")
     return text
 
 
-def parse_ai_response(text: str) -> dict:
+def parse_ai_response(text):
     result = {"title": "", "caption": "", "description": "", "hashtags": "", "raw": text}
     upper = text.upper()
     markers = {
-        "TITLE:":       "title",
-        "CAPTION:":     "caption",
+        "TITLE:": "title",
+        "CAPTION:": "caption",
         "DESCRIPTION:": "description",
-        "HASHTAGS:":    "hashtags",
+        "HASHTAGS:": "hashtags",
     }
     positions = []
     for marker, key in markers.items():
@@ -173,43 +143,23 @@ def parse_ai_response(text: str) -> dict:
         if idx != -1:
             positions.append((idx, marker, key))
     positions.sort()
-
     for i, (start_idx, marker, key) in enumerate(positions):
         content_start = start_idx + len(marker)
         content_end = positions[i + 1][0] if i + 1 < len(positions) else len(text)
         result[key] = text[content_start:content_end].strip()
-
     if not any(result[k] for k in ("title", "caption", "description")):
         result["title"] = text.strip()[:200]
-
     return result
 
 
-def is_available() -> bool:
+def is_available():
     if not _GENAI_AVAILABLE:
         return False
     return bool(_resolve_key())
 
 
-# =========================================================
-# SELF-TEST
-# =========================================================
 if __name__ == "__main__":
-    print("🧪 Testing AI Engine")
-    print(f"   Library:     {_GENAI_AVAILABLE}")
-    print(f"   Key:         {'set' if _resolve_key() else 'NOT set'}")
-    print(f"   Model:       {GEMINI_MODEL_NAME}")
-    print(f"   Available:   {is_available()}")
-
-    if not is_available():
-        print("\n❌ AI not available.")
-        raise SystemExit(1)
-
-    print("\n🤖 Test call…")
-    try:
-        raw = regenerate_for_tinytoon("Test Title", "Test description")
-        print("\n✅ Response:\n")
-        print(raw[:600])
-    except Exception as e:
-        print(f"\n❌ Error: {e}")
-        raise SystemExit(1)
+    print(f"Library: {_GENAI_AVAILABLE}")
+    print(f"Key: {'set' if _resolve_key() else 'NOT set'}")
+    print(f"Model: {GEMINI_MODEL_NAME}")
+    print(f"Available: {is_available()}")

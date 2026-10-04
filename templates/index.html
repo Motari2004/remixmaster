@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>🎬 Remix Master</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=2026-10-04d" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=2026-10-04e" />
 </head>
 <body>
   <div class="app">
@@ -16,12 +16,9 @@
     </header>
 
     <main class="grid">
-
       <!-- LEFT: CONTROLS -->
       <section class="panel controls">
-
         <h2>1. Video Source</h2>
-
         <label id="dropZone" class="drop-zone">
           <input type="file" id="fileInput" accept="video/*" hidden />
           <div class="drop-content">
@@ -30,29 +27,16 @@
             <small>MP4, MOV, AVI, MKV, WEBM · up to 500 MB</small>
           </div>
         </label>
-
         <div class="url-row" style="margin-top:12px;">
-          <input type="url" id="videoUrl"
-                 placeholder="https://... .mp4  or any direct video link"
-                 autocomplete="off" />
-          <button type="button" id="fetchUrlBtn" class="mini-btn">
-            🌐 Fetch &amp; Remix
-          </button>
+          <input type="url" id="videoUrl" placeholder="https://... .mp4" autocomplete="off" />
+          <button type="button" id="fetchUrlBtn" class="mini-btn">🌐 Fetch &amp; Remix</button>
         </div>
-        <small class="hint">
-          Paste a direct video URL (MP4, WEBM, MOV). The server downloads it
-          then runs the same remix pipeline.
-        </small>
-
         <div id="fileInfo" class="file-info hidden"></div>
 
-        <h2>2. Effects Pool (random mode)</h2>
+        <h2>2. Effects Pool</h2>
         <p class="hint">
-          Used only when no ordered list is set below.
-          <a href="#" id="selectAll">All</a> ·
-          <a href="#" id="selectNone">None</a>
+          <a href="#" id="selectAll">All</a> · <a href="#" id="selectNone">None</a>
         </p>
-
         {% for category, items in groups.items() %}
         <div class="effect-group">
           <h3>{{ category }}</h3>
@@ -67,13 +51,9 @@
         </div>
         {% endfor %}
 
-        <h2>3. Effect Order (super control)</h2>
-
+        <h2>3. Effect Order</h2>
         <div class="order-block">
-          <h3>🧱 Base Effects (whole video, in order)</h3>
-          <p class="hint">
-            Applied <strong>once to the entire video</strong>, start → end.
-          </p>
+          <h3>🧱 Base Effects</h3>
           <div class="ordered-list" id="baseList"></div>
           <select id="baseAdd" class="add-effect">
             <option value="">+ Add base effect…</option>
@@ -86,12 +66,8 @@
             {% endfor %}
           </select>
         </div>
-
         <div class="order-block">
-          <h3>🎬 Per-Segment Effects (with segment windows)</h3>
-          <p class="hint">
-            Choose which effects fire, in what order, and on which segments.
-          </p>
+          <h3>🎬 Per-Segment Effects</h3>
           <div class="ordered-list windows" id="segList"></div>
           <select id="segAdd" class="add-effect">
             <option value="">+ Add segment effect…</option>
@@ -103,136 +79,96 @@
             </optgroup>
             {% endfor %}
           </select>
-
           <div class="window-quick">
-            <label>
-              Segments:
-              <input type="number" id="totalSegmentsHint"
-                     min="1" max="500" value="0" readonly />
-            </label>
+            <label>Segments: <input type="number" id="totalSegmentsHint" min="1" max="500" value="0" readonly /></label>
             <button type="button" id="spreadEvenly" class="mini-btn">✨ Spread evenly</button>
             <button type="button" id="fillAllSegments" class="mini-btn">🌐 Fill all</button>
           </div>
-
           <label class="toggle small">
             <input type="checkbox" id="rotate_order" checked />
             <span>🔁 Rotate order each chunk</span>
           </label>
-
           <div id="timelinePreview"></div>
         </div>
 
         <h2>4. Remix Settings</h2>
-
         <div class="field">
           <label>Segment Length <output id="outDuration">3.0s</output></label>
-          <input type="range" id="segment_duration"
-                 min="1" max="8" value="3" step="0.5" />
+          <input type="range" id="segment_duration" min="1" max="8" value="3" step="0.5" />
         </div>
-
         <div class="field">
           <label>Effects per Segment <output id="outEffects">3</output></label>
-          <input type="range" id="effects_per_segment"
-                 min="1" max="5" value="3" step="1" />
+          <input type="range" id="effects_per_segment" min="1" max="5" value="3" step="1" />
         </div>
-
         <div class="field">
           <label>Output Quality</label>
           <select id="quality_preset" class="add-effect">
             <option value="fast">⚡ Fastest (CRF 22)</option>
             <option value="medium">🚀 Balanced (CRF 20)</option>
-            <option value="high" selected>🎬 High Quality (CRF 18) — default</option>
+            <option value="high" selected>🎬 High Quality (CRF 18)</option>
             <option value="max">🏆 Maximum (CRF 16)</option>
             <option value="lossless">💎 Lossless (CRF 0)</option>
           </select>
         </div>
-
         <div class="field">
           <label>Crop Top Keeps <output id="outCropTop">95%</output></label>
-          <input type="range" id="crop_top_pct"
-                 min="0.30" max="1.00" value="0.95" step="0.05" />
+          <input type="range" id="crop_top_pct" min="0.30" max="1.00" value="0.95" step="0.05" />
         </div>
-
         <div class="field">
           <label>Crop Bottom Keeps <output id="outCropBottom">95%</output></label>
-          <input type="range" id="crop_bottom_pct"
-                 min="0.30" max="1.00" value="0.95" step="0.05" />
+          <input type="range" id="crop_bottom_pct" min="0.30" max="1.00" value="0.95" step="0.05" />
         </div>
-
         <label class="toggle">
           <input type="checkbox" id="preserve_audio" checked />
           <span>🎵 Preserve original audio</span>
         </label>
-
         <label class="toggle">
           <input type="checkbox" id="group_by_category" />
           <span>🎨 Group effects by category</span>
         </label>
-
         <div class="field" id="runLengthField" style="display:none">
           <label>Category Run Length <output id="outRun">3</output></label>
           <input type="range" id="category_run_length" min="1" max="10" value="3" step="1" />
         </div>
-
         <label class="toggle">
           <input type="checkbox" id="motion_aware" />
           <span>🎞️ Motion-aware (cut on scene changes)</span>
         </label>
-
         <div class="field" id="thresholdField" style="display:none">
           <label>Scene Threshold <output id="outThresh">30</output></label>
           <input type="range" id="scene_threshold" min="10" max="80" value="30" step="5" />
         </div>
-
         <button id="remixBtn" class="primary" disabled>🚀 Remix It!</button>
 
-        <!-- ============ 5. CSV MANAGER ============ -->
+        <!-- 5. CSV MANAGER -->
         <h2>5. Group CSV Manager</h2>
-
-        <div class="order-block" id="csvBlock">
+        <div class="order-block">
           <h3>📁 Upload Group CSVs</h3>
-          <p class="hint">
-            Drag and drop your <code>group_N.csv</code> files here (or click to browse).
-            Format: <code>Video ID, Title, Description</code>.
-          </p>
-
+          <p class="hint">Format: <code>Video ID, Title, Description</code></p>
           <label id="csvDropZone" class="drop-zone csv-drop">
             <input type="file" id="csvFileInput" accept=".csv" multiple hidden />
             <div class="drop-content">
               <span class="icon">📄</span>
               <p><strong>Drop CSV files</strong> or click to browse</p>
-              <small>Select all 67 at once — they'll upload in order</small>
+              <small>Select all 67 at once</small>
             </div>
           </label>
-
           <div id="csvUploadProgress" class="progress-wrap hidden">
             <div class="progress-bar"><div id="csvProgressFill"></div></div>
             <p id="csvProgressText">Uploading…</p>
           </div>
-
           <div id="csvUploadResult" class="ai-status"></div>
-
           <div class="ai-actions" style="margin-top:10px">
-            <button type="button" id="csvRefreshBtn" class="mini-btn">
-              🔄 Refresh Group List
-            </button>
-            <button type="button" id="csvDeleteAllBtn" class="mini-btn">
-              🗑️ Delete All CSVs
-            </button>
+            <button type="button" id="csvRefreshBtn" class="mini-btn">🔄 Refresh</button>
+            <button type="button" id="csvDeleteAllBtn" class="mini-btn">🗑️ Delete All</button>
           </div>
-
           <div id="csvFileList" class="csv-file-list"></div>
         </div>
 
-        <!-- ============ 6. AI ONE-BY-ONE ============ -->
+        <!-- 6. AI PROCESSING -->
         <h2>6. AI One-by-One Processing</h2>
-
         <div class="order-block" id="aiBlock">
           <h3>🤖 TinyToon World Pipeline</h3>
-          <p class="hint">
-            Load a group, then process each video one at a time:
-            AI reformat → fetch → remix → publish.
-          </p>
 
           <div class="ai-input">
             <label>
@@ -241,14 +177,9 @@
                 <option value="">— Loading groups… —</option>
               </select>
             </label>
-
             <div class="ai-actions">
-              <button type="button" id="aiLoadGroupBtn" class="mini-btn">
-                📥 Load Group
-              </button>
-              <button type="button" id="aiRefreshGroups" class="mini-btn">
-                🔄 Refresh List
-              </button>
+              <button type="button" id="aiLoadGroupBtn" class="mini-btn">📥 Load Group</button>
+              <button type="button" id="aiRefreshGroups" class="mini-btn">🔄 Refresh</button>
             </div>
           </div>
 
@@ -257,46 +188,54 @@
           <div class="ai-input">
             <label>
               <span class="label-text">Or paste manually (URL / title / description):</span>
-              <textarea id="aiRawInput" rows="5" placeholder="### GROUP: Fruits
-https://youtube.com/shorts/ABC1
-Fruit Ice Cream! 🍦🍓
-Wow, yummy!..."></textarea>
+              <textarea id="aiRawInput" rows="5"></textarea>
             </label>
             <div class="ai-actions">
-              <button type="button" id="aiParseBtn" class="mini-btn">
-                📥 Parse &amp; Add
-              </button>
+              <button type="button" id="aiParseBtn" class="mini-btn">📥 Parse &amp; Add</button>
             </div>
           </div>
 
           <hr style="border-color:var(--border);margin:16px 0" />
 
           <div class="ai-actions">
-            <button type="button" id="aiProcessOneBtn" class="mini-btn process-btn-main">
-              ▶️ Process Next
-            </button>
-            <button type="button" id="aiProcessSelectedBtn" class="mini-btn">
-              ⚡ Process All Sequentially
-            </button>
-            <button type="button" id="aiSkipBtn" class="mini-btn">
-              ⏭️ Skip
-            </button>
-            <button type="button" id="aiClearBtn" class="mini-btn">
-              🗑️ Clear
-            </button>
+            <button type="button" id="aiProcessOneBtn" class="mini-btn process-btn-main">▶️ Process Next</button>
+            <button type="button" id="aiBatchStartBtn" class="mini-btn batch-btn-start">🚀 Start Group Batch</button>
+            <button type="button" id="aiBatchStopBtn" class="mini-btn batch-btn-stop" style="display:none">⏹️ Stop Batch</button>
+            <button type="button" id="aiSkipBtn" class="mini-btn">⏭️ Skip</button>
+            <button type="button" id="aiClearBtn" class="mini-btn">🗑️ Clear</button>
           </div>
+
+          <div class="batch-settings" id="batchSettings">
+            <h4>⚙️ Batch Mode Settings</h4>
+            <div class="batch-field">
+              <label>Cooldown between groups (min):</label>
+              <input type="number" id="batchCooldown" value="30" min="1" max="180" />
+            </div>
+            <div class="batch-field">
+              <label>Groups per session:</label>
+              <input type="number" id="batchGroupsPerSession" value="" placeholder="All" min="1" max="67" />
+            </div>
+            <label class="toggle small">
+              <input type="checkbox" id="batchSkipPublished" checked />
+              <span>Skip groups already published</span>
+            </label>
+            <label class="toggle small">
+              <input type="checkbox" id="batchNotifySounds" checked />
+              <span>🔔 Notification sound on group complete</span>
+            </label>
+          </div>
+
+          <div id="batchStatus" class="batch-status hidden"></div>
 
           <div id="aiProgressPanel" class="ai-progress-panel hidden">
             <h4>▶️ Processing: <span id="aiCurrentTitle">—</span></h4>
             <div class="ai-steps" id="aiSteps">
-              <div class="ai-step" data-step="ai">🤖 AI Reform</div>
+              <div class="ai-step" data-step="ai">🤖 AI</div>
               <div class="ai-step" data-step="fetch">📥 Fetch</div>
               <div class="ai-step" data-step="remix">🎬 Remix</div>
               <div class="ai-step" data-step="publish">📤 Publish</div>
             </div>
-            <div class="progress-bar" style="margin-top:8px">
-              <div id="aiCurrentProgress"></div>
-            </div>
+            <div class="progress-bar" style="margin-top:8px"><div id="aiCurrentProgress"></div></div>
             <div id="aiCurrentStatus" class="ai-status"></div>
           </div>
 
@@ -305,42 +244,37 @@ Wow, yummy!..."></textarea>
           <div id="aiQueue" class="ai-queue"></div>
         </div>
 
-        <!-- ============ 7. AI SETTINGS ============ -->
-        <h2>7. AI Settings</h2>
+        <!-- 7. PROGRESS DASHBOARD -->
+        <h2>7. Server Progress</h2>
+        <div class="order-block" id="progressDashboardBlock">
+          <h3>📊 Processing Progress</h3>
+          <div class="progress-stats" id="progressStats"></div>
+          <div class="progress-groups" id="progressGroups"></div>
+          <div class="ai-actions" style="margin-top:10px">
+            <button type="button" id="refreshProgressBtn" class="mini-btn">🔄 Refresh</button>
+            <button type="button" id="resetAllProgressBtn" class="mini-btn" style="color:#fca5a5">🗑️ Reset All</button>
+          </div>
+        </div>
 
+        <!-- 8. AI SETTINGS -->
+        <h2>8. AI Settings</h2>
         <div class="order-block" id="settingsBlock">
           <h3>🔑 Gemini API Key</h3>
           <p class="hint">
-            Paste your Google Gemini API key here. It's saved on the server
-            in <code>settings.json</code> — no restart needed.
             Get one free at
-            <a href="https://aistudio.google.com/app/apikey" target="_blank"
-               style="color:var(--accent-2)">aistudio.google.com/app/apikey</a>.
+            <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:var(--accent-2)">aistudio.google.com/app/apikey</a>
           </p>
-
           <div class="settings-field">
             <label>
-              <span class="label-text">
-                API Key
-                <span id="geminiKeyStatus" class="key-status"></span>
-              </span>
-              <input type="password" id="setGeminiKey"
-                     placeholder="AIzaSy..." autocomplete="off" />
+              <span class="label-text">API Key <span id="geminiKeyStatus" class="key-status"></span></span>
+              <input type="password" id="setGeminiKey" placeholder="AIzaSy..." autocomplete="off" />
             </label>
           </div>
-
           <div class="ai-actions" style="margin-top:12px">
-            <button type="button" id="saveGeminiBtn" class="mini-btn process-btn-main">
-              💾 Save Key
-            </button>
-            <button type="button" id="testGeminiBtn" class="mini-btn">
-              🧪 Test Key
-            </button>
-            <button type="button" id="clearGeminiBtn" class="mini-btn">
-              🗑️ Clear
-            </button>
+            <button type="button" id="saveGeminiBtn" class="mini-btn process-btn-main">💾 Save Key</button>
+            <button type="button" id="testGeminiBtn" class="mini-btn">🧪 Test Key</button>
+            <button type="button" id="clearGeminiBtn" class="mini-btn">🗑️ Clear</button>
           </div>
-
           <div id="geminiSettingsStatus" class="ai-status"></div>
         </div>
 
@@ -348,7 +282,6 @@ Wow, yummy!..."></textarea>
 
       <!-- RIGHT: PREVIEW -->
       <section class="panel preview">
-
         <div class="preview-header">
           <h2>Preview</h2>
           <div class="view-toggle hidden" id="viewToggle">
@@ -361,7 +294,6 @@ Wow, yummy!..."></textarea>
         <div id="placeholder" class="placeholder">
           <span>🎥</span>
           <p>Your remixed video will appear here</p>
-          <small>Upload a video or paste a URL to get started</small>
         </div>
 
         <div id="compareArea" class="compare-area hidden">
@@ -375,13 +307,10 @@ Wow, yummy!..."></textarea>
               <video id="previewVideo" controls playsinline></video>
             </div>
           </div>
-
           <div id="sliderView" class="compare-mode">
             <div class="slider-container" id="sliderContainer">
               <video id="sliderOriginal" playsinline muted></video>
-              <div class="slider-top" id="sliderTop">
-                <video id="sliderRemix" playsinline></video>
-              </div>
+              <div class="slider-top" id="sliderTop"><video id="sliderRemix" playsinline></video></div>
               <div class="slider-handle" id="sliderHandle">
                 <div class="handle-line"></div>
                 <div class="handle-grip">⇋</div>
@@ -397,7 +326,6 @@ Wow, yummy!..."></textarea>
               <span id="sliderTime">0:00 / 0:00</span>
             </div>
           </div>
-
           <div id="singleView" class="compare-mode">
             <video id="singleVideo" controls playsinline></video>
           </div>
@@ -421,6 +349,6 @@ Wow, yummy!..."></textarea>
     <footer>Made with 🐍 Python · Flask · MoviePy</footer>
   </div>
 
-  <script src="{{ url_for('static', filename='script.js') }}?v=2026-10-04d"></script>
+  <script src="{{ url_for('static', filename='script.js') }}?v=2026-10-04e"></script>
 </body>
 </html>

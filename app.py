@@ -1,19 +1,7 @@
 """
 🎬 Remix Master — Flask backend (VPS)
 
-Two-step flow:
-  1) Stage: /stage_upload or /fetch_url — downloads and returns a token
-  2) Remix: /remix/<token> — runs the remix pipeline on the staged file
-
-Features:
-  - Flask-CORS for cross-origin requests from a remote frontend
-  - Fixed public_url() — returns proper absolute URLs
-  - Permanent original saved to /outputs/ for the compare view
-  - CSV group loading + UI upload for groups-metadata/
-  - Gemini AI content reformatting for TinyToon World
-  - Gemini API key editable from the UI (settings.json)
-  - Buffer API integration for YouTube Shorts auto-posting
-  - Auto cleanup of old outputs
+Persistent group & URL progress tracking + AI reformatting + Buffer publishing.
 """
 
 import os
@@ -35,7 +23,6 @@ try:
     from flask_cors import CORS
 except ImportError:
     CORS = None
-    print("⚠️  flask-cors not installed. Run: pip install flask-cors")
 
 from werkzeug.utils import secure_filename
 
@@ -51,7 +38,6 @@ try:
         is_available as ai_available,
     )
 except ImportError:
-    print("⚠️  ai_engine not found — AI features disabled")
     def regenerate_for_tinytoon(t, d):
         raise RuntimeError("ai_engine not loaded")
     def parse_ai_response(t):
@@ -60,15 +46,11 @@ except ImportError:
         return False
 
 
-# =========================================================
-# LAZY MOVIEPY / REMIX ENGINE IMPORT
-# =========================================================
 _REMIX_IMPORT_ERROR = None
 try:
     from remix_engine import remix_video, grouped_effects, EFFECTS
 except Exception as e:
     _REMIX_IMPORT_ERROR = str(e)
-    print(f"⚠️  Could not import remix_engine: {e}")
     def grouped_effects():
         return {}
     EFFECTS = {}
@@ -100,33 +82,20 @@ DIRECT_EXTS = {"mp4", "webm", "mov", "m4v", "mkv", "avi"}
 STAGED_TTL_SECONDS = 3600
 OUTPUT_TTL_SECONDS = 24 * 3600
 
-# ---- CORS ----
-DEFAULT_ORIGINS = (
-    "http://localhost:5000,"
-    "http://127.0.0.1:5000,"
-    "http://localhost:3000"
-)
-ALLOWED_ORIGINS = [
-    o.strip()
-    for o in os.environ.get("ALLOWED_ORIGINS", DEFAULT_ORIGINS).split(",")
-    if o.strip()
-]
-
+DEFAULT_ORIGINS = "http://localhost:5000,http://127.0.0.1:5000,http://localhost:3000"
+ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", DEFAULT_ORIGINS).split(",") if o.strip()]
 PUBLIC_API_BASE = os.environ.get("PUBLIC_API_BASE", "").rstrip("/")
 
-# ---- Buffer API ----
 BUFFER_API_URL = "https://api.buffer.com"
 BUFFER_API_KEY = os.environ.get("BUFFER_API_KEY", "")
 BUFFER_YOUTUBE_CHANNEL_ID = os.environ.get("BUFFER_YOUTUBE_CHANNEL_ID", "")
 
 
 # =========================================================
-# SETTINGS — runtime-editable keys saved to settings.json
+# SETTINGS
 # =========================================================
 SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
 SETTINGS_LOCK = threading.Lock()
-
-# Keys that can be overridden via the UI
 EDITABLE_SETTINGS = ("GEMINI_API_KEY",)
 
 
@@ -134,13 +103,9 @@ def _load_settings():
     try:
         with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            if isinstance(data, dict):
-                return data
-    except FileNotFoundError:
-        pass
-    except Exception as e:
-        print(f"  ⚠️  Could not read settings.json: {e}")
-    return {}
+            return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, Exception):
+        return {}
 
 
 def _save_settings(data):
@@ -149,11 +114,8 @@ def _save_settings(data):
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
         os.replace(tmp, SETTINGS_FILE)
-        # Restrict permissions (only owner can read)
-        try:
-            os.chmod(SETTINGS_FILE, 0o600)
-        except Exception:
-            pass
+        try: os.chmod(SETTINGS_FILE, 0o600)
+        except Exception: pass
         return True
     except Exception as e:
         print(f"  ⚠️  Could not write settings.json: {e}")
@@ -161,42 +123,110 @@ def _save_settings(data):
 
 
 def _get_setting(name, default=""):
-    """UI-saved value takes priority over env var."""
-    settings = _load_settings()
-    if name in settings and settings[name]:
-        return settings[name]
+    s = _load_settings()
+    if name in s and s[name]:
+        return s[name]
     return os.environ.get(name, default)
 
 
 def _get_gemini_key():
-    """Get the current Gemini key (UI override > env var)."""
     return _get_setting("GEMINI_API_KEY", "")
 
 
 def _apply_gemini_key_to_engine():
-    """Push the current Gemini key into the ai_engine module."""
     try:
         import ai_engine
         new_key = _get_gemini_key()
         if new_key and new_key != ai_engine.GEMINI_API_KEY:
             ai_engine.GEMINI_API_KEY = new_key
-            ai_engine._model = None   # force re-init on next call
+            ai_engine._model = None
             print(f"  🔑 Gemini key updated (len={len(new_key)})")
     except Exception as e:
-        print(f"  ⚠️  Could not update Gemini key in engine: {e}")
+        print(f"  ⚠️  Gemini key refresh failed: {e}")
 
 
+# =========================================================
+# PROGRESS TRACKING
+# =========================================================
+PROGRESS_FILE = os.path.join(DATA_DIR, "groups-progress.json")
+PROGRESS_LOCK = threading.Lock()
+
+
+def _load_progress():
+    try:
+        with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, Exception):
+        return {}
+
+
+def _save_progress(data):
+    try:
+        tmp = PROGRESS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, PROGRESS_FILE)
+        return True
+    except Exception as e:
+        print(f"  ⚠️  Could not write progress file: {e}")
+        return False
+
+
+def _init_group_progress(group_name, urls):
+    with PROGRESS_LOCK:
+        progress = _load_progress()
+        if group_name not in progress:
+            progress[group_name] = {
+                "status": "pending",
+                "processed_urls": [],
+                "pending_urls": list(urls),
+                "last_update": None,
+            }
+        else:
+            entry = progress[group_name]
+            current_urls = set(urls)
+            entry["pending_urls"] = [u for u in entry.get("pending_urls", []) if u in current_urls]
+            entry["processed_urls"] = [u for u in entry.get("processed_urls", []) if u in current_urls]
+            known = set(entry["pending_urls"]) | set(entry["processed_urls"])
+            for u in urls:
+                if u not in known:
+                    entry["pending_urls"].append(u)
+            if not entry["pending_urls"]:
+                entry["status"] = "done"
+        _save_progress(progress)
+        return progress[group_name]
+
+
+def _mark_url_processed(group_name, url, success=True):
+    with PROGRESS_LOCK:
+        progress = _load_progress()
+        if group_name not in progress:
+            progress[group_name] = {
+                "status": "pending",
+                "processed_urls": [],
+                "pending_urls": [],
+                "last_update": None,
+            }
+        entry = progress[group_name]
+        if url in entry["pending_urls"]:
+            entry["pending_urls"].remove(url)
+        if url not in entry["processed_urls"]:
+            entry["processed_urls"].append(url)
+        entry["status"] = "done" if not entry["pending_urls"] else "in_progress"
+        entry["last_update"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        _save_progress(progress)
+
+
+# =========================================================
+# APP
+# =========================================================
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_BYTES
 
 if CORS is not None:
-    CORS(
-        app,
-        resources={r"/*": {"origins": ALLOWED_ORIGINS if ALLOWED_ORIGINS != ["*"] else "*"}},
-        supports_credentials=False,
-        allow_headers="*",
-        methods=["GET", "POST", "OPTIONS"],
-    )
+    CORS(app, resources={r"/*": {"origins": ALLOWED_ORIGINS if ALLOWED_ORIGINS != ["*"] else "*"}},
+         supports_credentials=False, allow_headers="*", methods=["GET", "POST", "OPTIONS"])
 
 JOBS = {}
 STAGED = {}
@@ -211,50 +241,39 @@ def allowed_file(name):
 
 
 def _to_bool(v, default=False):
-    if v is None:
-        return default
-    if isinstance(v, bool):
-        return v
+    if v is None: return default
+    if isinstance(v, bool): return v
     return str(v).lower() in ("1", "true", "yes", "on")
 
 
 def _clean_windows(parsed):
     clean = []
     for w in parsed:
-        if not isinstance(w, dict):
-            continue
+        if not isinstance(w, dict): continue
         k = w.get("key")
-        if k not in EFFECTS:
-            continue
-        try:
-            frm = int(w.get("from", 1) or 1)
-        except (TypeError, ValueError):
-            frm = 1
+        if k not in EFFECTS: continue
+        try: frm = int(w.get("from", 1) or 1)
+        except (TypeError, ValueError): frm = 1
         to = w.get("to", None)
-        if to in ("", None, "null"):
-            to = None
+        if to in ("", None, "null"): to = None
         else:
-            try:
-                to = int(to)
-            except (TypeError, ValueError):
-                to = None
+            try: to = int(to)
+            except (TypeError, ValueError): to = None
         clean.append({"key": k, "from": max(1, frm), "to": to})
     return clean
 
 
-def guess_ext_from_url(url: str) -> str:
+def guess_ext_from_url(url):
     path = urlparse(url).path
     if "." in path:
         ext = path.rsplit(".", 1)[-1].lower().split("?")[0].split("&")[0]
-        if ext in ALLOWED:
-            return ext
+        if ext in ALLOWED: return ext
     return "mp4"
 
 
-def looks_like_direct_url(url: str) -> bool:
+def looks_like_direct_url(url):
     path = urlparse(url).path
-    if "." not in path:
-        return False
+    if "." not in path: return False
     ext = path.rsplit(".", 1)[-1].lower().split("?")[0].split("&")[0]
     return ext in DIRECT_EXTS
 
@@ -267,71 +286,49 @@ def _probe_duration(fpath):
         clip.close()
         return d
     except Exception as e:
-        print(f"  ⚠️  Could not probe duration: {e}")
+        print(f"  ⚠️  Duration probe failed: {e}")
         return 0
 
 
-def public_url(path: str) -> str:
+def public_url(path):
     if PUBLIC_API_BASE:
         return f"{PUBLIC_API_BASE}{path}"
     try:
         parsed = urlparse(request.url)
-        base = f"{parsed.scheme}://{parsed.netloc}"
-        return f"{base}{path}"
+        return f"{parsed.scheme}://{parsed.netloc}{path}"
     except Exception:
         return path
 
 
 def _require_remix_engine():
     if _REMIX_IMPORT_ERROR:
-        raise RuntimeError(
-            "Remix engine unavailable on this server. "
-            "This is expected if the app is running on a server without FFmpeg."
-        )
+        raise RuntimeError(f"Remix engine unavailable: {_REMIX_IMPORT_ERROR}")
 
 
 def _get_buffer_youtube_channel_id():
-    if not BUFFER_API_KEY:
+    api_key = _get_setting("BUFFER_API_KEY", BUFFER_API_KEY)
+    channel_id_env = _get_setting("BUFFER_YOUTUBE_CHANNEL_ID", BUFFER_YOUTUBE_CHANNEL_ID)
+    if not api_key:
         raise ValueError("BUFFER_API_KEY is not set.")
-    if BUFFER_YOUTUBE_CHANNEL_ID:
-        return BUFFER_YOUTUBE_CHANNEL_ID
+    if channel_id_env:
+        return channel_id_env
 
-    query = """
-    query {
-      account {
-        organizations { id }
-      }
-    }
-    """
-    resp = requests.post(
-        BUFFER_API_URL,
-        json={"query": query},
-        headers={"Authorization": f"Bearer {BUFFER_API_KEY}", "Content-Type": "application/json"},
-        timeout=30
-    )
+    resp = requests.post(BUFFER_API_URL,
+        json={"query": "query { account { organizations { id } } }"},
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        timeout=30)
     resp.raise_for_status()
-    data = resp.json()
-    orgs = data.get("data", {}).get("account", {}).get("organizations", [])
-    if not orgs:
-        raise ValueError("No Buffer organizations found.")
+    orgs = resp.json().get("data", {}).get("account", {}).get("organizations", [])
+    if not orgs: raise ValueError("No Buffer organizations found.")
     org_id = orgs[0]["id"]
 
-    query = """
-    query GetChannels($orgId: String!) {
-      channels(input: { organizationId: $orgId }) {
-        id name service
-      }
-    }
-    """
-    resp = requests.post(
-        BUFFER_API_URL,
-        json={"query": query, "variables": {"orgId": org_id}},
-        headers={"Authorization": f"Bearer {BUFFER_API_KEY}", "Content-Type": "application/json"},
-        timeout=30
-    )
+    resp = requests.post(BUFFER_API_URL,
+        json={"query": "query GetChannels($orgId: String!) { channels(input: { organizationId: $orgId }) { id name service } }",
+              "variables": {"orgId": org_id}},
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        timeout=30)
     resp.raise_for_status()
-    data = resp.json()
-    channels = data.get("data", {}).get("channels", [])
+    channels = resp.json().get("data", {}).get("channels", [])
     for ch in channels:
         if ch.get("service") == "youtube":
             return ch["id"]
@@ -345,27 +342,21 @@ def parse_options(src):
     if isinstance(src, dict):
         def getlist(k):
             v = src.get(k)
-            if v is None:
-                return []
+            if v is None: return []
             return v if isinstance(v, list) else [v]
-        def getone(k, d=None):
-            return src.get(k, d)
+        def getone(k, d=None): return src.get(k, d)
     else:
         getlist = src.getlist
         getone  = src.get
 
     def _cast(key, default, cast):
         v = getone(key, default)
-        try:
-            return cast(v)
-        except (TypeError, ValueError):
-            return default
+        try: return cast(v)
+        except (TypeError, ValueError): return default
 
     enabled = getlist("effects") or list(EFFECTS.keys())
     enabled = [e for e in enabled if e in EFFECTS]
-
-    base_effects = getlist("base_effects") or []
-    base_effects = [e for e in base_effects if e in EFFECTS]
+    base_effects = [e for e in (getlist("base_effects") or []) if e in EFFECTS]
 
     ordered_raw = getone("ordered_effects") or ""
     if isinstance(ordered_raw, list):
@@ -387,89 +378,73 @@ def parse_options(src):
         effect_windows = _clean_windows(raw_windows)
 
     options = {
-        "num_segments":        _cast("num_segments", None, lambda v: int(v) if v else None),
-        "segment_duration":    _cast("segment_duration", 3.0, float),
+        "num_segments": _cast("num_segments", None, lambda v: int(v) if v else None),
+        "segment_duration": _cast("segment_duration", 3.0, float),
         "effects_per_segment": _cast("effects_per_segment", 3, int),
-        "enabled_effects":     enabled,
-
-        "base_effects":        base_effects,
-        "ordered_effects":     ordered_effects,
-        "effect_windows":      effect_windows,
-        "rotate_order":        _to_bool(getone("rotate_order"), True),
-
-        "preserve_audio":      _to_bool(getone("preserve_audio"), True),
-        "group_by_category":   _to_bool(getone("group_by_category"), False),
+        "enabled_effects": enabled,
+        "base_effects": base_effects,
+        "ordered_effects": ordered_effects,
+        "effect_windows": effect_windows,
+        "rotate_order": _to_bool(getone("rotate_order"), True),
+        "preserve_audio": _to_bool(getone("preserve_audio"), True),
+        "group_by_category": _to_bool(getone("group_by_category"), False),
         "category_run_length": _cast("category_run_length", 3, int),
-        "motion_aware":        _to_bool(getone("motion_aware"), False),
-        "scene_threshold":     _cast("scene_threshold", 30.0, float),
-
-        "crop_top_pct":        _cast("crop_top_pct", 0.95, float),
-        "crop_bottom_pct":     _cast("crop_bottom_pct", 0.95, float),
-
-        "quality_preset":      getone("quality_preset", "high") or "high",
+        "motion_aware": _to_bool(getone("motion_aware"), False),
+        "scene_threshold": _cast("scene_threshold", 30.0, float),
+        "crop_top_pct": _cast("crop_top_pct", 0.95, float),
+        "crop_bottom_pct": _cast("crop_bottom_pct", 0.95, float),
+        "quality_preset": getone("quality_preset", "high") or "high",
     }
 
     options["effects_per_segment"] = max(1, min(7, options["effects_per_segment"]))
-    options["segment_duration"]    = max(1.0, min(15.0, options["segment_duration"]))
+    options["segment_duration"] = max(1.0, min(15.0, options["segment_duration"]))
     options["category_run_length"] = max(1, min(10, options["category_run_length"]))
-    options["scene_threshold"]     = max(5.0, min(120.0, options["scene_threshold"]))
-    options["crop_top_pct"]        = max(0.10, min(1.00, options["crop_top_pct"]))
-    options["crop_bottom_pct"]     = max(0.10, min(1.00, options["crop_bottom_pct"]))
+    options["scene_threshold"] = max(5.0, min(120.0, options["scene_threshold"]))
+    options["crop_top_pct"] = max(0.10, min(1.00, options["crop_top_pct"]))
+    options["crop_bottom_pct"] = max(0.10, min(1.00, options["crop_bottom_pct"]))
     if options["quality_preset"] not in ("fast", "medium", "high", "max", "lossless"):
         options["quality_preset"] = "high"
-
     return options
 
 
 # =========================================================
-# EXTERNAL RESOLVER
+# RESOLVER + DOWNLOAD
 # =========================================================
-def resolve_via_external_api(video_url: str) -> str:
+def resolve_via_external_api(video_url):
     if requests is None:
-        raise ValueError("The 'requests' library is not installed on the server.")
+        raise ValueError("requests not installed")
     print(f"  🔗 Resolving via {DOWNLOAD_API_URL}")
     try:
-        r = requests.post(
-            DOWNLOAD_API_URL,
+        r = requests.post(DOWNLOAD_API_URL,
             json={"url": video_url, "quality": "1080p", "format": "mp4"},
-            timeout=DOWNLOAD_API_TIMEOUT,
-        )
+            timeout=DOWNLOAD_API_TIMEOUT)
     except requests.exceptions.RequestException as e:
-        raise ValueError(f"Resolver service unreachable: {e}")
-
+        raise ValueError(f"Resolver unreachable: {e}")
     if not r.ok:
-        raise ValueError(f"Resolver returned HTTP {r.status_code}: {r.text[:200]}")
-
+        raise ValueError(f"Resolver HTTP {r.status_code}: {r.text[:200]}")
     try:
         data = r.json()
     except Exception:
-        raise ValueError(f"Resolver returned non-JSON: {r.text[:200]}")
-
+        raise ValueError(f"Resolver non-JSON: {r.text[:200]}")
     if data.get("success") is False and data.get("error"):
         raise ValueError(f"Resolver error: {data['error']}")
-
     direct = (data.get("download_url") or data.get("url") or data.get("direct_url")
               or (data.get("data") or {}).get("download_url"))
     if not direct:
-        raise ValueError(f"Resolver did not return a download URL: {data}")
-
+        raise ValueError(f"No download_url in resolver response")
     print(f"  ✅ Resolved: {direct[:80]}...")
     return direct
 
 
-# =========================================================
-# DOWNLOAD HELPER
-# =========================================================
-def download_url_to_upload_dir(url: str):
+def download_url_to_upload_dir(url):
     if requests is None:
-        raise ValueError("The 'requests' library is not installed on the server.")
+        raise ValueError("requests not installed")
     if not url.startswith(("http://", "https://")):
         raise ValueError("URL must start with http:// or https://")
-
     if not looks_like_direct_url(url):
         url = resolve_via_external_api(url)
     else:
-        print(f"  ⚡ Direct URL — skipping resolver")
+        print(f"  ⚡ Direct URL")
 
     parsed = urlparse(url)
     base_name = os.path.basename(parsed.path) or "remote_video"
@@ -477,44 +452,30 @@ def download_url_to_upload_dir(url: str):
     fname = f"{uuid.uuid4().hex[:12]}.{ext}"
     fpath = os.path.join(UPLOAD_DIR, secure_filename(fname))
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-        "Accept": "*/*",
-    }
-
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "*/*"}
     try:
         with requests.get(url, stream=True, timeout=60, headers=headers) as r:
             r.raise_for_status()
             total = 0
             with open(fpath, "wb") as f:
                 for chunk in r.iter_content(chunk_size=1024 * 512):
-                    if not chunk:
-                        continue
+                    if not chunk: continue
                     f.write(chunk)
                     total += len(chunk)
                     if total > MAX_BYTES:
-                        f.close()
-                        try: os.remove(fpath)
-                        except Exception: pass
-                        raise ValueError("Remote file exceeds the 500 MB limit.")
-        print(f"  💾 Saved to: {fpath}  ({total/1024/1024:.2f} MB)")
+                        f.close(); os.remove(fpath)
+                        raise ValueError("File exceeds 500 MB")
+        print(f"  💾 Saved {fpath} ({total/1024/1024:.2f} MB)")
         return fpath, base_name
     except requests.exceptions.RequestException as e:
         if os.path.exists(fpath):
             try: os.remove(fpath)
             except Exception: pass
-        raise ValueError(f"Could not download resolved URL: {e}")
-    except ValueError:
-        raise
-    except Exception as e:
-        if os.path.exists(fpath):
-            try: os.remove(fpath)
-            except Exception: pass
-        raise ValueError(f"Unexpected error while downloading: {e}")
+        raise ValueError(f"Download failed: {e}")
 
 
 # =========================================================
-# STAGED FILE MANAGEMENT
+# STAGED FILES
 # =========================================================
 def _stage_file(fpath, input_name):
     token = uuid.uuid4().hex[:12]
@@ -540,11 +501,8 @@ def _cleanup_stale_stages():
                     STAGED.pop(tok, None)
         for tok, fp in to_delete:
             try:
-                if os.path.exists(fp):
-                    os.remove(fp)
-                    print(f"  🧹 Cleaned up stale staged file: {fp}")
-            except Exception as e:
-                print(f"  ⚠️  Cleanup failed for {fp}: {e}")
+                if os.path.exists(fp): os.remove(fp)
+            except Exception: pass
 
 
 def _cleanup_old_outputs():
@@ -554,14 +512,11 @@ def _cleanup_old_outputs():
         try:
             for fname in os.listdir(OUTPUT_DIR):
                 fpath = os.path.join(OUTPUT_DIR, fname)
-                try:
-                    if os.path.isfile(fpath) and (now - os.path.getmtime(fpath)) > OUTPUT_TTL_SECONDS:
-                        os.remove(fpath)
-                        print(f"  🧹 Cleaned up old output: {fpath}")
-                except Exception as e:
-                    print(f"  ⚠️  Output cleanup failed for {fpath}: {e}")
+                if os.path.isfile(fpath) and (now - os.path.getmtime(fpath)) > OUTPUT_TTL_SECONDS:
+                    os.remove(fpath)
+                    print(f"  🧹 Removed {fname}")
         except Exception as e:
-            print(f"  ⚠️  Output cleanup loop error: {e}")
+            print(f"  ⚠️  Cleanup error: {e}")
 
 
 threading.Thread(target=_cleanup_stale_stages, daemon=True).start()
@@ -569,7 +524,7 @@ threading.Thread(target=_cleanup_old_outputs, daemon=True).start()
 
 
 # =========================================================
-# CSV GROUP LOADING
+# CSV LOADING
 # =========================================================
 def _load_csv_group(csv_path):
     items = []
@@ -581,80 +536,59 @@ def _load_csv_group(csv_path):
 
             id_col = None
             url_col = None
-
             for n in fieldnames:
                 if n in ("video id", "videoid", "video_id", "id"):
-                    id_col = n
-                    break
+                    id_col = n; break
             if not id_col:
                 for n in fieldnames:
                     if n in ("url", "video_url", "link", "short_url"):
-                        url_col = n
-                        break
+                        url_col = n; break
 
             title_col = next((n for n in fieldnames if n in ("title", "video_title", "name")), None)
             desc_col = next((n for n in fieldnames if n in ("description", "video_description", "desc", "caption")), None)
 
             if not id_col and not url_col:
-                print(f"  ⚠️  No ID or URL column in {csv_path}")
                 return items
 
             f.seek(0)
             reader = csv.DictReader(f)
-
             for i, row in enumerate(reader):
-                row_lc = {}
-                for k, v in row.items():
-                    if k is None:
-                        continue
-                    row_lc[k.strip().lower()] = (v or "").strip()
-
-                url = ""
-                if url_col:
-                    url = row_lc.get(url_col, "").strip()
+                row_lc = {k.strip().lower(): (v or "").strip() for k, v in row.items() if k}
+                url = row_lc.get(url_col, "").strip() if url_col else ""
                 if not url and id_col:
-                    video_id = row_lc.get(id_col, "").strip()
-                    if video_id:
-                        url = f"https://www.youtube.com/shorts/{video_id}"
-
-                if not url:
-                    continue
-
-                title = row_lc.get(title_col, "").strip() if title_col else ""
-                description = row_lc.get(desc_col, "").strip() if desc_col else ""
-
+                    vid = row_lc.get(id_col, "").strip()
+                    if vid: url = f"https://www.youtube.com/shorts/{vid}"
+                if not url: continue
                 items.append({
                     "id": f"{os.path.splitext(os.path.basename(csv_path))[0]}_{i+1}",
                     "url": url,
                     "video_id": row_lc.get(id_col, "").strip() if id_col else "",
-                    "title": title,
-                    "description": description,
+                    "title": row_lc.get(title_col, "").strip() if title_col else "",
+                    "description": row_lc.get(desc_col, "").strip() if desc_col else "",
                 })
-
     except Exception as e:
-        print(f"  ⚠️  Could not read {csv_path}: {e}")
+        print(f"  ⚠️  CSV read failed {csv_path}: {e}")
     return items
 
 
+# =========================================================
+# API — GROUPS
+# =========================================================
 @app.route("/api/groups")
 def api_groups():
     try:
-        pattern = os.path.join(GROUPS_DIR, "*.csv")
-        all_files = glob.glob(pattern)
-        files = sorted(all_files, key=lambda p: (
-            int("".join(c for c in os.path.basename(p) if c.isdigit()) or 0),
-            os.path.basename(p)
-        ))
+        files = sorted(
+            glob.glob(os.path.join(GROUPS_DIR, "*.csv")),
+            key=lambda p: (int("".join(c for c in os.path.basename(p) if c.isdigit()) or 0),
+                           os.path.basename(p))
+        )
         groups = []
         for path in files:
             name = os.path.splitext(os.path.basename(path))[0]
-            count = 0
             try:
                 with open(path, "r", encoding="utf-8-sig") as f:
-                    reader = csv.DictReader(f)
-                    count = sum(1 for _ in reader)
-            except Exception:
-                pass
+                    count = sum(1 for _ in csv.DictReader(f))
+            except Exception: count = 0
             groups.append({"name": name, "count": count})
         return jsonify(success=True, groups=groups, dir=GROUPS_DIR)
     except Exception as e:
@@ -667,79 +601,118 @@ def api_group_detail(name):
     path = os.path.join(GROUPS_DIR, f"{safe_name}.csv")
     if not os.path.exists(path):
         return jsonify(error=f"Group '{name}' not found"), 404
-
     items = _load_csv_group(path)
+    urls = [it["url"] for it in items]
+    _init_group_progress(safe_name, urls)
     return jsonify(success=True, name=safe_name, items=items, count=len(items))
 
 
-# =========================================================
-# UPLOAD CSV FILES
-# =========================================================
 @app.route("/api/upload_csv", methods=["POST"])
 def upload_csv():
     if "files" not in request.files:
         return jsonify(success=False, error="No files provided"), 400
-
     files = request.files.getlist("files")
     if not files:
         return jsonify(success=False, error="No files selected"), 400
 
     os.makedirs(GROUPS_DIR, exist_ok=True)
-
-    uploaded = []
-    failed = []
-
+    uploaded, failed = [], []
     for f in files:
-        if not f or not f.filename:
-            continue
-
-        original_name = f.filename
-        if not original_name.lower().endswith(".csv"):
-            failed.append({"name": original_name, "error": "Not a CSV file"})
-            continue
-
-        safe_name = secure_filename(original_name)
-        if not safe_name:
-            failed.append({"name": original_name, "error": "Invalid filename"})
-            continue
-
-        dest = os.path.join(GROUPS_DIR, safe_name)
+        if not f or not f.filename: continue
+        if not f.filename.lower().endswith(".csv"):
+            failed.append({"name": f.filename, "error": "Not a CSV"}); continue
+        safe = secure_filename(f.filename)
+        if not safe:
+            failed.append({"name": f.filename, "error": "Invalid filename"}); continue
+        dest = os.path.join(GROUPS_DIR, safe)
         try:
             f.save(dest)
-            try:
-                with open(dest, "r", encoding="utf-8-sig") as fh:
-                    reader = csv.DictReader(fh)
-                    _ = reader.fieldnames
-            except Exception as e:
-                os.remove(dest)
-                failed.append({"name": original_name, "error": f"Invalid CSV: {e}"})
-                continue
-
-            uploaded.append(safe_name)
-            print(f"  📥 CSV uploaded: {safe_name}")
+            with open(dest, "r", encoding="utf-8-sig") as fh:
+                _ = csv.DictReader(fh).fieldnames
+            uploaded.append(safe)
         except Exception as e:
-            failed.append({"name": original_name, "error": str(e)})
+            failed.append({"name": f.filename, "error": str(e)})
 
-    return jsonify(success=True, uploaded=uploaded, failed=failed, dir=GROUPS_DIR)
+    return jsonify(success=True, uploaded=uploaded, failed=failed)
 
 
 @app.route("/api/delete_csv/<name>", methods=["POST"])
 def delete_csv(name):
-    safe_name = secure_filename(name)
-    if not safe_name.endswith(".csv"):
-        safe_name += ".csv"
-    path = os.path.join(GROUPS_DIR, safe_name)
+    safe = secure_filename(name)
+    if not safe.endswith(".csv"): safe += ".csv"
+    path = os.path.join(GROUPS_DIR, safe)
     if not os.path.exists(path):
-        return jsonify(success=False, error="File not found"), 404
+        return jsonify(success=False, error="Not found"), 404
     try:
         os.remove(path)
-        return jsonify(success=True, deleted=safe_name)
+        return jsonify(success=True, deleted=safe)
     except Exception as e:
         return jsonify(success=False, error=str(e)), 500
 
 
 # =========================================================
-# AI — REFORMAT TITLE + DESCRIPTION
+# API — PROGRESS
+# =========================================================
+@app.route("/api/progress")
+def api_progress():
+    progress = _load_progress()
+    total_groups = len(progress)
+    done_groups = sum(1 for g in progress.values() if g.get("status") == "done")
+    in_progress = sum(1 for g in progress.values() if g.get("status") == "in_progress")
+    total_urls = sum(len(g.get("processed_urls", [])) + len(g.get("pending_urls", []))
+                     for g in progress.values())
+    processed_urls = sum(len(g.get("processed_urls", [])) for g in progress.values())
+    return jsonify(
+        success=True,
+        total_groups=total_groups,
+        done_groups=done_groups,
+        in_progress_groups=in_progress,
+        pending_groups=total_groups - done_groups - in_progress,
+        total_urls=total_urls,
+        processed_urls=processed_urls,
+        groups=progress,
+    )
+
+
+@app.route("/api/progress/<group_name>")
+def api_progress_group(group_name):
+    safe = secure_filename(group_name)
+    progress = _load_progress()
+    if safe not in progress:
+        csv_path = os.path.join(GROUPS_DIR, f"{safe}.csv")
+        if os.path.exists(csv_path):
+            items = _load_csv_group(csv_path)
+            urls = [it["url"] for it in items]
+            entry = _init_group_progress(safe, urls)
+            return jsonify(success=True, group=safe, data=entry)
+        return jsonify(error="Not found"), 404
+    return jsonify(success=True, group=safe, data=progress[safe])
+
+
+@app.route("/api/progress/reset", methods=["POST"])
+def api_progress_reset():
+    data = request.get_json(silent=True) or {}
+    if data.get("confirm") != "yes-reset-all":
+        return jsonify(error="Confirm required"), 400
+    with PROGRESS_LOCK:
+        if _save_progress({}):
+            return jsonify(success=True, message="All progress reset")
+        return jsonify(error="Could not reset"), 500
+
+
+@app.route("/api/progress/reset/<group_name>", methods=["POST"])
+def api_progress_reset_group(group_name):
+    safe = secure_filename(group_name)
+    with PROGRESS_LOCK:
+        progress = _load_progress()
+        if safe in progress:
+            del progress[safe]
+            _save_progress(progress)
+    return jsonify(success=True, reset=safe)
+
+
+# =========================================================
+# API — AI
 # =========================================================
 @app.route("/api/ai/status")
 def ai_status():
@@ -750,17 +723,13 @@ def ai_status():
 @app.route("/api/ai/reformat", methods=["POST"])
 def ai_reformat():
     _apply_gemini_key_to_engine()
-
     if not ai_available():
-        return jsonify(error="AI not configured. Set GEMINI_API_KEY in the settings panel."), 503
-
+        return jsonify(error="AI not configured. Set GEMINI_API_KEY in settings."), 503
     data = request.get_json(silent=True) or {}
     title = (data.get("title") or "").strip()
     description = (data.get("description") or "").strip()
-
     if not title:
         return jsonify(error="Title is required"), 400
-
     try:
         raw = regenerate_for_tinytoon(title, description)
         parsed = parse_ai_response(raw)
@@ -771,71 +740,53 @@ def ai_reformat():
 
 
 # =========================================================
-# SETTINGS — GEMINI API KEY
+# API — SETTINGS
 # =========================================================
 @app.route("/api/settings", methods=["GET"])
 def api_settings_get():
-    """Return which settings are set (masked). Never expose full keys."""
     settings = _load_settings()
-    out = {}
-
-    # Gemini
     ui_key = settings.get("GEMINI_API_KEY", "")
     env_key = os.environ.get("GEMINI_API_KEY", "")
     effective = ui_key or env_key
-
+    out = {}
     if effective:
         masked = effective[:6] + "…" + effective[-4:] if len(effective) > 12 else "••••"
         source = "ui" if ui_key else "env"
         out["GEMINI_API_KEY"] = {"set": True, "masked": masked, "source": source}
     else:
         out["GEMINI_API_KEY"] = {"set": False, "masked": "", "source": None}
-
     return jsonify(success=True, settings=out)
 
 
 @app.route("/api/settings", methods=["POST"])
 def api_settings_post():
-    """Update settings. Body: {"GEMINI_API_KEY": "AIza..."}"""
     data = request.get_json(silent=True) or {}
     if not isinstance(data, dict):
         return jsonify(success=False, error="Invalid payload"), 400
-
     with SETTINGS_LOCK:
         settings = _load_settings()
         changed = []
-
         for k, v in data.items():
-            if k not in EDITABLE_SETTINGS:
-                continue
+            if k not in EDITABLE_SETTINGS: continue
             v = (v or "").strip()
             if v:
-                settings[k] = v
-                changed.append(k)
+                settings[k] = v; changed.append(k)
             else:
                 if k in settings:
-                    del settings[k]
-                    changed.append(f"{k} (cleared)")
-
+                    del settings[k]; changed.append(f"{k} (cleared)")
         if not _save_settings(settings):
-            return jsonify(success=False, error="Could not save settings.json"), 500
-
+            return jsonify(success=False, error="Could not save"), 500
     _apply_gemini_key_to_engine()
-
     return jsonify(success=True, changed=changed)
 
 
 @app.route("/api/settings/test", methods=["POST"])
 def api_settings_test():
-    """Test the currently-configured Gemini key."""
     _apply_gemini_key_to_engine()
-
     results = {}
-
     try:
         import ai_engine
         key = _get_gemini_key()
-
         if not ai_engine._GENAI_AVAILABLE:
             results["ai"] = {"ok": False, "message": "google-generativeai not installed"}
         elif not key:
@@ -848,14 +799,13 @@ def api_settings_test():
                 results["ai"] = {"ok": False, "message": str(e)}
     except Exception as e:
         results["ai"] = {"ok": False, "message": str(e)}
-
     return jsonify(success=True, results=results)
 
 
 # =========================================================
-# BACKGROUND WORKER
+# JOB WORKER
 # =========================================================
-def run_job(job_id, input_path, options):
+def run_job(job_id, input_path, options, group_name=None, source_url=None):
     job = JOBS[job_id]
     try:
         def cb(step, total, msg):
@@ -866,8 +816,7 @@ def run_job(job_id, input_path, options):
                 job["progress"] = int(100 * step / max(1, total))
 
         output_name = remix_video(
-            input_path=input_path,
-            output_dir=OUTPUT_DIR,
+            input_path=input_path, output_dir=OUTPUT_DIR,
             num_segments=options["num_segments"],
             segment_duration=options["segment_duration"],
             effects_per_segment=options["effects_per_segment"],
@@ -902,28 +851,39 @@ def run_job(job_id, input_path, options):
             job["progress"] = 100
             job["message"] = "Remix complete!"
             job["output"] = output_name
+
+        if group_name and source_url:
+            try:
+                _mark_url_processed(group_name, source_url, success=True)
+                print(f"  ✅ Progress: {group_name} / {source_url[:60]}")
+            except Exception as e:
+                print(f"  ⚠️  Progress mark failed: {e}")
     except Exception as e:
         with JOBS_LOCK:
             job["status"] = "error"
             job["message"] = f"Error: {e}"
         print("JOB ERROR:", e)
+        if group_name and source_url:
+            try:
+                _mark_url_processed(group_name, source_url, success=False)
+            except Exception: pass
     finally:
         try:
-            if os.path.exists(input_path):
-                os.remove(input_path)
-        except Exception:
-            pass
+            if os.path.exists(input_path): os.remove(input_path)
+        except Exception: pass
 
 
-def launch_job(input_path, options, input_name="video"):
+def launch_job(input_path, options, input_name="video", group_name=None, source_url=None):
     job_id = uuid.uuid4().hex[:12]
     with JOBS_LOCK:
         JOBS[job_id] = {
             "status": "running", "progress": 0, "step": 0, "total": 1,
             "message": "Queued...", "output": None, "input_name": input_name,
-            "options": options,
+            "options": options, "group_name": group_name, "source_url": source_url,
         }
-    threading.Thread(target=run_job, args=(job_id, input_path, options), daemon=True).start()
+    threading.Thread(target=run_job,
+                     args=(job_id, input_path, options, group_name, source_url),
+                     daemon=True).start()
     return job_id
 
 
@@ -933,7 +893,7 @@ def launch_job(input_path, options, input_name="video"):
 @app.route("/")
 def index():
     if _REMIX_IMPORT_ERROR:
-        return jsonify(status="degraded", error="Remix engine unavailable", detail=_REMIX_IMPORT_ERROR), 503
+        return jsonify(status="degraded", error="Remix engine unavailable"), 503
     effect_labels = {k: v[0] for k, v in EFFECTS.items()}
     return render_template("index.html", groups=grouped_effects(), effect_labels=effect_labels)
 
@@ -946,128 +906,74 @@ def healthz():
 @app.route("/api/effects")
 def api_effects():
     if _REMIX_IMPORT_ERROR:
-        return jsonify(error="Remix engine unavailable", detail=_REMIX_IMPORT_ERROR), 503
-    effect_labels = {k: v[0] for k, v in EFFECTS.items()}
-    return jsonify(groups=grouped_effects(), labels=effect_labels, all=list(EFFECTS.keys()))
+        return jsonify(error="Remix engine unavailable"), 503
+    labels = {k: v[0] for k, v in EFFECTS.items()}
+    return jsonify(groups=grouped_effects(), labels=labels, all=list(EFFECTS.keys()))
 
 
 @app.route("/stage_upload", methods=["POST"])
 def stage_upload():
-    try:
-        _require_remix_engine()
-    except RuntimeError as e:
-        return jsonify(error=str(e)), 503
-    if "video" not in request.files:
-        return jsonify(error="No file part"), 400
+    _require_remix_engine()
+    if "video" not in request.files: return jsonify(error="No file part"), 400
     file = request.files["video"]
-    if not file or file.filename == "":
-        return jsonify(error="No file selected"), 400
-    if not allowed_file(file.filename):
-        return jsonify(error="Unsupported file type"), 400
+    if not file or not file.filename: return jsonify(error="No file"), 400
+    if not allowed_file(file.filename): return jsonify(error="Unsupported"), 400
     ext = file.filename.rsplit(".", 1)[1].lower()
     fname = f"{uuid.uuid4().hex[:12]}.{ext}"
     fpath = os.path.join(UPLOAD_DIR, secure_filename(fname))
     file.save(fpath)
     token = _stage_file(fpath, file.filename)
     duration = _probe_duration(fpath)
-    return jsonify(success=True, token=token, input_name=file.filename, duration=duration, preview_url=public_url(f"/staged/{token}"))
+    return jsonify(success=True, token=token, input_name=file.filename,
+                   duration=duration, preview_url=public_url(f"/staged/{token}"))
 
 
 @app.route("/fetch_url", methods=["POST"])
 def fetch_url():
-    try:
-        _require_remix_engine()
-    except RuntimeError as e:
-        return jsonify(error=str(e)), 503
+    _require_remix_engine()
     url = (request.form.get("video_url") or "").strip()
-    if not url:
-        return jsonify(error="No URL provided"), 400
+    if not url: return jsonify(error="No URL"), 400
     try:
         fpath, base_name = download_url_to_upload_dir(url)
     except ValueError as e:
         return jsonify(error=str(e)), 400
     token = _stage_file(fpath, base_name)
     duration = _probe_duration(fpath)
-    return jsonify(success=True, token=token, input_name=base_name, duration=duration, preview_url=public_url(f"/staged/{token}"))
+    return jsonify(success=True, token=token, input_name=base_name,
+                   duration=duration, preview_url=public_url(f"/staged/{token}"))
 
 
 @app.route("/remix/<token>", methods=["POST"])
 def remix_staged(token):
-    try:
-        _require_remix_engine()
-    except RuntimeError as e:
-        return jsonify(error=str(e)), 503
+    _require_remix_engine()
     staged = _consume_stage(token)
-    if not staged:
-        return jsonify(error="Unknown or expired token"), 404
+    if not staged: return jsonify(error="Unknown/expired token"), 404
     fpath = staged["fpath"]
-    if not os.path.exists(fpath):
-        return jsonify(error="Staged file no longer exists"), 404
+    if not os.path.exists(fpath): return jsonify(error="File gone"), 404
     options = parse_options(request.form)
-    job_id = launch_job(fpath, options, staged["input_name"])
+    group_name = (request.form.get("group_name") or "").strip() or None
+    source_url = (request.form.get("source_url") or "").strip() or None
+    job_id = launch_job(fpath, options, staged["input_name"],
+                        group_name=group_name, source_url=source_url)
     return jsonify(job_id=job_id, options=options)
 
 
 @app.route("/staged/<token>")
 def staged_preview(token):
     info = STAGED.get(token)
-    if not info:
-        return "Not found", 404
+    if not info: return "Not found", 404
     fpath = info["fpath"]
-    if not os.path.exists(fpath):
-        return "Gone", 404
+    if not os.path.exists(fpath): return "Gone", 404
     resp = send_file(fpath, conditional=True, mimetype="video/mp4")
     resp.headers["Access-Control-Allow-Origin"] = "*"
     resp.headers["Accept-Ranges"] = "bytes"
     return resp
 
 
-@app.route("/upload", methods=["POST"])
-def upload():
-    try:
-        _require_remix_engine()
-    except RuntimeError as e:
-        return jsonify(error=str(e)), 503
-    if "video" not in request.files:
-        return jsonify(error="No file part"), 400
-    file = request.files["video"]
-    if not file or file.filename == "":
-        return jsonify(error="No file selected"), 400
-    if not allowed_file(file.filename):
-        return jsonify(error="Unsupported file type"), 400
-    ext = file.filename.rsplit(".", 1)[1].lower()
-    fname = f"{uuid.uuid4().hex[:12]}.{ext}"
-    fpath = os.path.join(UPLOAD_DIR, secure_filename(fname))
-    file.save(fpath)
-    options = parse_options(request.form)
-    job_id = launch_job(fpath, options, file.filename)
-    return jsonify(job_id=job_id, options=options)
-
-
-@app.route("/api/fetch", methods=["POST"])
-def api_fetch():
-    try:
-        _require_remix_engine()
-    except RuntimeError as e:
-        return jsonify(success=False, error=str(e)), 503
-    data = request.get_json(silent=True) or {}
-    url = (data.get("url") or "").strip()
-    if not url:
-        return jsonify(success=False, error="No URL provided"), 400
-    try:
-        fpath, base_name = download_url_to_upload_dir(url)
-    except ValueError as e:
-        return jsonify(success=False, error=str(e)), 400
-    options = parse_options(data)
-    job_id = launch_job(fpath, options, base_name)
-    return jsonify(success=True, error=None, job_id=job_id, input_name=base_name, options=options)
-
-
 @app.route("/status/<job_id>")
 def status(job_id):
     job = JOBS.get(job_id)
-    if not job:
-        return jsonify(error="Unknown job"), 404
+    if not job: return jsonify(error="Unknown job"), 404
     resp = {"status": job["status"], "progress": job["progress"], "message": job["message"]}
     if job["status"] == "done":
         resp["download_url"] = public_url(f"/download/{job['output']}")
@@ -1087,76 +993,19 @@ def download_attach(filename):
     return send_from_directory(OUTPUT_DIR, filename, as_attachment=True, mimetype="video/mp4")
 
 
-@app.route("/effects")
-def effects_list():
-    return jsonify(groups=grouped_effects(), all=list(EFFECTS.keys()))
-
-
-@app.route("/api/fetch_metadata", methods=["POST"])
-def fetch_metadata():
-    if requests is None:
-        return jsonify(error="requests not installed"), 500
-
-    url = ""
-    if request.form.get("url"):
-        url = request.form["url"].strip()
-    else:
-        data = request.get_json(silent=True) or {}
-        url = (data.get("url") or "").strip()
-
-    if not url:
-        return jsonify(error="No URL provided"), 400
-
-    title = ""
-    description = ""
-
-    try:
-        oembed_url = f"https://www.youtube.com/oembed?url={url}&format=json"
-        r = requests.get(oembed_url, timeout=15)
-        if r.ok:
-            o = r.json()
-            title = o.get("title", "")
-            author = o.get("author_name", "")
-            description = f"By {author}" if author else ""
-    except Exception as e:
-        print(f"  ⚠️  oEmbed failed: {e}")
-
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-        r = requests.get(url, timeout=15, headers=headers)
-        if r.ok:
-            html = r.text
-            m = re.search(r'<meta\s+name="description"\s+content="([^"]+)"', html)
-            if m:
-                desc = m.group(1)
-                desc = (desc.replace("&quot;", '"').replace("&amp;", "&")
-                            .replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">"))
-                if len(desc) > len(description):
-                    description = desc
-    except Exception as e:
-        print(f"  ⚠️  Page scrape failed: {e}")
-
-    return jsonify(success=True, title=title, description=description, url=url)
-
-
 # =========================================================
-# PUBLISH TO YOUTUBE VIA BUFFER
+# PUBLISH VIA BUFFER
 # =========================================================
 @app.route("/publish_to_youtube/<job_id>", methods=["POST"])
 def publish_to_youtube(job_id):
     job = JOBS.get(job_id)
     if not job or job.get("status") != "done":
-        return jsonify(error="Job not found or not complete"), 404
-
-    if not BUFFER_API_KEY:
-        return jsonify(error="Buffer API key is not configured on the server."), 500
+        return jsonify(error="Job not complete"), 404
+    api_key = _get_setting("BUFFER_API_KEY", BUFFER_API_KEY)
+    if not api_key:
+        return jsonify(error="Buffer API key not set"), 500
 
     public_video_url = public_url(f"/outputs/{job['output']}")
-    print(f"  📤 Publishing URL: {public_video_url}")
-
     data = request.get_json() or {}
     title = data.get("title", "Remix Master Video")
     caption = data.get("caption", title)
@@ -1181,23 +1030,14 @@ def publish_to_youtube(job_id):
             "schedulingType": "automatic",
             "mode": "addToQueue",
             "assets": [{"video": {"url": public_video_url}}],
-            "metadata": {
-                "youtube": {
-                    "title": title,
-                    "categoryId": "22",
-                    "privacy": "public"
-                }
-            }
+            "metadata": {"youtube": {"title": title, "categoryId": "22", "privacy": "public"}}
         }
     }
-
     try:
-        resp = requests.post(
-            BUFFER_API_URL,
+        resp = requests.post(BUFFER_API_URL,
             json={"query": mutation, "variables": variables},
-            headers={"Authorization": f"Bearer {BUFFER_API_KEY}", "Content-Type": "application/json"},
-            timeout=30
-        )
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            timeout=30)
         resp.raise_for_status()
         result = resp.json()
         if "errors" in result:
@@ -1210,33 +1050,18 @@ def publish_to_youtube(job_id):
         return jsonify(error=str(e)), 500
 
 
-# =========================================================
-# APPLY SAVED SETTINGS ON STARTUP
-# =========================================================
 try:
     _apply_gemini_key_to_engine()
-except Exception as _e:
-    print(f"  ⚠️  Startup settings refresh failed: {_e}")
+except Exception as e:
+    print(f"  ⚠️  Startup refresh failed: {e}")
 
 
-# =========================================================
-# ENTRYPOINT
-# =========================================================
 if __name__ == "__main__":
-    print(f"🌐 Resolver URL:    {DOWNLOAD_API_URL}")
-    print(f"📁 Data dir:        {DATA_DIR}")
-    print(f"📚 Groups dir:      {GROUPS_DIR}")
-    print(f"🔗 Public API base: {PUBLIC_API_BASE or '(derived from request)'}")
-    print(f"✅ Allowed origins: {ALLOWED_ORIGINS}")
-    print(f"🤖 AI available:    {ai_available()}")
-    if BUFFER_API_KEY:
-        print(f"✅ Buffer API key:  configured")
-    else:
-        print(f"⚠️  Buffer API key:  NOT configured")
-    if _REMIX_IMPORT_ERROR:
-        print(f"⚠️  Remix engine:   DISABLED ({_REMIX_IMPORT_ERROR})")
-    else:
-        print(f"✅ Remix engine:    OK ({len(EFFECTS)} effects)")
+    print(f"🌐 Resolver:  {DOWNLOAD_API_URL}")
+    print(f"📁 Data:      {DATA_DIR}")
+    print(f"📚 Groups:    {GROUPS_DIR}")
+    print(f"🔗 API base:  {PUBLIC_API_BASE or '(auto)'}")
+    print(f"🤖 AI:        {ai_available()}")
     port = int(os.environ.get("PORT", 5000))
     debug = os.environ.get("FLASK_DEBUG", "1") == "1"
     app.run(host="0.0.0.0", port=port, debug=debug)
