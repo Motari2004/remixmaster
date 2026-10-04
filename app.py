@@ -1,7 +1,7 @@
 """
 🎬 Remix Master — Flask backend (VPS)
 
-Persistent group & URL progress tracking + AI reformatting + Buffer publishing.
+Server-side batch worker + persistent progress tracking + AI + Buffer.
 """
 
 import os
@@ -216,6 +216,215 @@ def _mark_url_processed(group_name, url, success=True):
         entry["status"] = "done" if not entry["pending_urls"] else "in_progress"
         entry["last_update"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         _save_progress(progress)
+
+
+# =========================================================
+# BATCH WORKER (server-side)
+# =========================================================
+BATCH_STATE = {
+    "running": False,
+    "abort": False,
+    "current_group": None,
+    "current_url": None,
+    "groups_total": 0,
+    "groups_done": 0,
+    "items_total": 0,
+    "items_done": 0,
+    "cooldown_until": 0,
+    "started_at": 0,
+    "last_message": "",
+    "last_error": None,
+    "groups_list": [],
+}
+BATCH_LOCK = threading.Lock()
+BATCH_THREAD = None
+
+
+def _batch_status_snapshot():
+    with BATCH_LOCK:
+        s = dict(BATCH_STATE)
+    if s["cooldown_until"] > time.time():
+        s["cooldown_remaining"] = int(s["cooldown_until"] - time.time())
+    else:
+        s["cooldown_remaining"] = 0
+    return s
+
+
+def _run_batch_worker(groups, cooldown_seconds):
+    """Background thread that processes groups sequentially."""
+    try:
+        for gi, group_name in enumerate(groups):
+            with BATCH_LOCK:
+                if BATCH_STATE["abort"]:
+                    break
+                BATCH_STATE["current_group"] = group_name
+                BATCH_STATE["last_message"] = f"Loading {group_name}"
+
+            csv_path = os.path.join(GROUPS_DIR, f"{group_name}.csv")
+            if not os.path.exists(csv_path):
+                with BATCH_LOCK:
+                    BATCH_STATE["last_error"] = f"CSV missing: {group_name}"
+                continue
+
+            items = _load_csv_group(csv_path)
+            urls = [it["url"] for it in items]
+            _init_group_progress(group_name, urls)
+
+            progress = _load_progress()
+            entry = progress.get(group_name, {})
+            pending = list(entry.get("pending_urls", []))
+
+            # Map URL -> title/description for AI
+            url_meta = {it["url"]: it for it in items}
+
+            with BATCH_LOCK:
+                BATCH_STATE["items_total"] = len(pending)
+                BATCH_STATE["items_done"] = 0
+                BATCH_STATE["last_message"] = f"{group_name}: {len(pending)} items"
+
+            for i, url in enumerate(pending):
+                with BATCH_LOCK:
+                    if BATCH_STATE["abort"]:
+                        break
+                    BATCH_STATE["current_url"] = url
+                    BATCH_STATE["last_message"] = f"{group_name} [{i+1}/{len(pending)}]"
+
+                meta = url_meta.get(url, {})
+                try:
+                    _process_single_url(url, group_name,
+                                        raw_title=meta.get("title", ""),
+                                        raw_desc=meta.get("description", ""))
+                except Exception as e:
+                    print(f"  ❌ Batch item failed: {url} — {e}")
+                    try:
+                        _mark_url_processed(group_name, url, success=False)
+                    except Exception:
+                        pass
+
+                with BATCH_LOCK:
+                    BATCH_STATE["items_done"] += 1
+
+            with BATCH_LOCK:
+                BATCH_STATE["groups_done"] += 1
+                BATCH_STATE["current_url"] = None
+
+            # Cooldown between groups
+            if gi < len(groups) - 1 and not BATCH_STATE["abort"]:
+                with BATCH_LOCK:
+                    BATCH_STATE["cooldown_until"] = time.time() + cooldown_seconds
+                    BATCH_STATE["last_message"] = f"Cooldown after {group_name}"
+                while time.time() < BATCH_STATE["cooldown_until"]:
+                    if BATCH_STATE["abort"]:
+                        break
+                    time.sleep(2)
+
+        with BATCH_LOCK:
+            BATCH_STATE["running"] = False
+            BATCH_STATE["current_group"] = None
+            BATCH_STATE["current_url"] = None
+            BATCH_STATE["cooldown_until"] = 0
+            BATCH_STATE["last_message"] = "Batch finished" if not BATCH_STATE["abort"] else "Batch aborted"
+    except Exception as e:
+        print(f"  ❌ Batch worker crashed: {e}")
+        with BATCH_LOCK:
+            BATCH_STATE["running"] = False
+            BATCH_STATE["last_error"] = str(e)
+            BATCH_STATE["last_message"] = f"Error: {e}"
+
+
+def _process_single_url(url, group_name, raw_title="", raw_desc=""):
+    """
+    Process one URL: fetch → remix → publish. Blocking.
+    Called from the batch worker thread.
+    """
+    # 1. Fetch
+    with BATCH_LOCK:
+        BATCH_STATE["last_message"] = f"Fetching {url[:40]}…"
+    fpath, base_name = download_url_to_upload_dir(url)
+
+    # 2. AI reformat (if available)
+    ai_title = raw_title or "Remix Master Video"
+    ai_caption = raw_desc or ai_title
+    try:
+        if ai_available() and (raw_title or raw_desc):
+            with BATCH_LOCK:
+                BATCH_STATE["last_message"] = f"AI reformat {url[:40]}…"
+            raw = regenerate_for_tinytoon(raw_title, raw_desc)
+            parsed = parse_ai_response(raw)
+            ai_title = parsed.get("title") or ai_title
+            ai_caption = parsed.get("caption") or ai_caption
+    except Exception as e:
+        print(f"  ⚠️  AI skipped for {url[:40]}: {e}")
+
+    # 3. Remix (run synchronously)
+    with BATCH_LOCK:
+        BATCH_STATE["last_message"] = f"Remixing {url[:40]}…"
+
+    options = parse_options({})
+    job_id = uuid.uuid4().hex[:12]
+    with JOBS_LOCK:
+        JOBS[job_id] = {
+            "status": "running", "progress": 0, "step": 0, "total": 1,
+            "message": "Queued...", "output": None, "input_name": base_name,
+            "options": options, "group_name": group_name, "source_url": url,
+        }
+
+    run_job(job_id, fpath, options, group_name=group_name, source_url=url)
+
+    job = JOBS.get(job_id)
+    if not job or job.get("status") != "done":
+        raise RuntimeError(f"Remix failed: {job.get('message') if job else 'unknown'}")
+
+    # 4. Publish to Buffer
+    with BATCH_LOCK:
+        BATCH_STATE["last_message"] = f"Publishing {url[:40]}…"
+    try:
+        _publish_to_buffer_internal(job["output"], ai_title, ai_caption)
+        print(f"  ✅ Batch: {group_name} — {url[:60]}")
+    except Exception as e:
+        print(f"  ⚠️  Publish failed for {url[:60]}: {e}")
+        # Don't fail the whole item — mark it done anyway
+
+
+def _publish_to_buffer_internal(output_filename, title, caption):
+    api_key = _get_setting("BUFFER_API_KEY", BUFFER_API_KEY)
+    if not api_key:
+        raise RuntimeError("BUFFER_API_KEY not set")
+    video_url = public_url(f"/outputs/{output_filename}")
+    channel_id = _get_buffer_youtube_channel_id()
+
+    mutation = """
+    mutation CreatePost($input: CreatePostInput!) {
+      createPost(input: $input) {
+        ... on PostActionSuccess { post { id dueAt status } }
+        ... on MutationError { message }
+      }
+    }
+    """
+    variables = {
+        "input": {
+            "channelId": channel_id,
+            "text": caption,
+            "schedulingType": "automatic",
+            "mode": "addToQueue",
+            "assets": [{"video": {"url": video_url}}],
+            "metadata": {"youtube": {"title": title, "categoryId": "22", "privacy": "public"}},
+        }
+    }
+    resp = requests.post(
+        BUFFER_API_URL,
+        json={"query": mutation, "variables": variables},
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    result = resp.json()
+    if "errors" in result:
+        raise RuntimeError(str(result["errors"]))
+    br = result.get("data", {}).get("createPost", {})
+    if isinstance(br, dict) and br.get("message"):
+        raise RuntimeError(br["message"])
+    return br
 
 
 # =========================================================
@@ -712,6 +921,96 @@ def api_progress_reset_group(group_name):
 
 
 # =========================================================
+# API — BATCH (server-side)
+# =========================================================
+@app.route("/api/batch/start", methods=["POST"])
+def api_batch_start():
+    global BATCH_THREAD
+
+    with BATCH_LOCK:
+        if BATCH_STATE["running"]:
+            return jsonify(error="Batch already running"), 400
+
+    data = request.get_json(silent=True) or {}
+    cooldown_min = max(1, int(data.get("cooldown_minutes", 30)))
+    groups_per_session = data.get("groups_per_session")
+    skip_published = bool(data.get("skip_published", True))
+
+    all_groups = sorted(
+        [os.path.splitext(os.path.basename(p))[0]
+         for p in glob.glob(os.path.join(GROUPS_DIR, "*.csv"))],
+        key=lambda x: (int("".join(c for c in x if c.isdigit()) or 0), x),
+    )
+
+    if skip_published:
+        progress = _load_progress()
+        all_groups = [g for g in all_groups
+                      if progress.get(g, {}).get("status") != "done"]
+
+    if groups_per_session:
+        try:
+            all_groups = all_groups[:int(groups_per_session)]
+        except (TypeError, ValueError):
+            pass
+
+    if not all_groups:
+        return jsonify(error="No groups to process"), 400
+
+    with BATCH_LOCK:
+        BATCH_STATE.update({
+            "running": True, "abort": False,
+            "current_group": None, "current_url": None,
+            "groups_total": len(all_groups), "groups_done": 0,
+            "items_total": 0, "items_done": 0,
+            "cooldown_until": 0, "started_at": time.time(),
+            "last_message": "Starting…", "last_error": None,
+            "groups_list": list(all_groups),
+        })
+
+    BATCH_THREAD = threading.Thread(
+        target=_run_batch_worker,
+        args=(all_groups, cooldown_min * 60),
+        daemon=True,
+    )
+    BATCH_THREAD.start()
+
+    return jsonify(success=True, groups=all_groups, cooldown_minutes=cooldown_min)
+
+
+@app.route("/api/batch/status")
+def api_batch_status():
+    return jsonify(success=True, **(_batch_status_snapshot()))
+
+
+@app.route("/api/batch/stop", methods=["POST"])
+def api_batch_stop():
+    with BATCH_LOCK:
+        if not BATCH_STATE["running"]:
+            return jsonify(error="No batch running"), 400
+        BATCH_STATE["abort"] = True
+        BATCH_STATE["last_message"] = "Stopping…"
+    return jsonify(success=True)
+
+
+@app.route("/api/batch/reset", methods=["POST"])
+def api_batch_reset():
+    global BATCH_STATE
+    with BATCH_LOCK:
+        if BATCH_STATE["running"]:
+            return jsonify(error="Cannot reset while running"), 400
+        BATCH_STATE = {
+            "running": False, "abort": False,
+            "current_group": None, "current_url": None,
+            "groups_total": 0, "groups_done": 0,
+            "items_total": 0, "items_done": 0,
+            "cooldown_until": 0, "started_at": 0,
+            "last_message": "", "last_error": None,
+            "groups_list": [],
+        }
+    return jsonify(success=True)
+
+
+# =========================================================
 # API — AI
 # =========================================================
 @app.route("/api/ai/status")
@@ -993,6 +1292,30 @@ def download_attach(filename):
     return send_from_directory(OUTPUT_DIR, filename, as_attachment=True, mimetype="video/mp4")
 
 
+@app.route("/api/fetch_metadata", methods=["POST"])
+def fetch_metadata():
+    if requests is None:
+        return jsonify(error="requests not installed"), 500
+    url = ""
+    if request.form.get("url"):
+        url = request.form["url"].strip()
+    else:
+        data = request.get_json(silent=True) or {}
+        url = (data.get("url") or "").strip()
+    if not url:
+        return jsonify(error="No URL provided"), 400
+    title, description = "", ""
+    try:
+        oembed_url = f"https://www.youtube.com/oembed?url={url}&format=json"
+        r = requests.get(oembed_url, timeout=15)
+        if r.ok:
+            o = r.json()
+            title = o.get("title", "")
+            description = f"By {o.get('author_name', '')}" if o.get("author_name") else ""
+    except Exception: pass
+    return jsonify(success=True, title=title, description=description, url=url)
+
+
 # =========================================================
 # PUBLISH VIA BUFFER
 # =========================================================
@@ -1004,52 +1327,19 @@ def publish_to_youtube(job_id):
     api_key = _get_setting("BUFFER_API_KEY", BUFFER_API_KEY)
     if not api_key:
         return jsonify(error="Buffer API key not set"), 500
-
-    public_video_url = public_url(f"/outputs/{job['output']}")
     data = request.get_json() or {}
     title = data.get("title", "Remix Master Video")
     caption = data.get("caption", title)
-
     try:
-        channel_id = _get_buffer_youtube_channel_id()
+        _publish_to_buffer_internal(job["output"], title, caption)
+        return jsonify(success=True)
     except Exception as e:
         return jsonify(error=str(e)), 500
 
-    mutation = """
-    mutation CreatePost($input: CreatePostInput!) {
-      createPost(input: $input) {
-        ... on PostActionSuccess { post { id dueAt status } }
-        ... on MutationError { message }
-      }
-    }
-    """
-    variables = {
-        "input": {
-            "channelId": channel_id,
-            "text": caption,
-            "schedulingType": "automatic",
-            "mode": "addToQueue",
-            "assets": [{"video": {"url": public_video_url}}],
-            "metadata": {"youtube": {"title": title, "categoryId": "22", "privacy": "public"}}
-        }
-    }
-    try:
-        resp = requests.post(BUFFER_API_URL,
-            json={"query": mutation, "variables": variables},
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            timeout=30)
-        resp.raise_for_status()
-        result = resp.json()
-        if "errors" in result:
-            return jsonify(error=result["errors"]), 400
-        buffer_result = result.get("data", {}).get("createPost", {})
-        if isinstance(buffer_result, dict) and buffer_result.get("message"):
-            return jsonify(error=buffer_result["message"]), 400
-        return jsonify(success=True, buffer_result=buffer_result)
-    except requests.exceptions.RequestException as e:
-        return jsonify(error=str(e)), 500
 
-
+# =========================================================
+# STARTUP
+# =========================================================
 try:
     _apply_gemini_key_to_engine()
 except Exception as e:
