@@ -1,20 +1,20 @@
 """
 🎬 Remix Engine — Motion-Flow Remix Master (optimized + crash-proof + stable)
 
-Key stability fixes for VPS encoding:
+Stability fixes:
   - Lighter presets (veryfast/ultrafast) — less RAM/CPU pressure
   - Encode threads capped at 2 — prevents context-switch corruption
-  - 720p output cap for stability — still meets Buffer/YouTube Shorts minimums
-  - CRF tuned for good-quality small files
+  - 720p output cap for stability
   - Verified moov atom + duration on output
+  - Duplicate function name fixed (color_high_contrast)
 
-Speed optimizations:
+Speed:
   - Auto-downgrade long videos to faster preset
   - Segment duration default 3s (fewer chunks)
 
-Quality optimizations:
-  - Preserves source resolution for normal videos (unless capped)
-  - Auto-upscales small vertical outputs to 720x1280 (YouTube Shorts minimum)
+Quality:
+  - Preserves source resolution unless capped
+  - Auto-upscales small vertical outputs to 720x1280 (Shorts minimum)
 """
 
 import os
@@ -37,14 +37,14 @@ from moviepy.video.fx.all import (
 QUALITY_MAP = {
     "fast":     {"preset": "ultrafast", "crf": "24"},
     "medium":   {"preset": "veryfast",  "crf": "22"},
-    "high":     {"preset": "veryfast",  "crf": "20"},   # ← default (stable)
+    "high":     {"preset": "veryfast",  "crf": "20"},
     "max":      {"preset": "faster",    "crf": "18"},
     "lossless": {"preset": "medium",    "crf": "0"},
 }
 
 
 # =========================================================
-# RESOLUTION CAPS — prevents encoding large frames
+# RESOLUTION CAPS
 # =========================================================
 MAX_VERTICAL_W = 720
 MAX_VERTICAL_H = 1280
@@ -57,7 +57,7 @@ MIN_HORIZONTAL_W = 1280
 MIN_HORIZONTAL_H = 720
 
 LONG_VIDEO_THRESHOLD = 60
-ENCODE_THREADS = 2   # ← was 4, lowered for stability
+ENCODE_THREADS = 2
 
 
 # =========================================================
@@ -154,7 +154,8 @@ def color_colder(clip, **kw):
         return out.clip(0, 255).astype("uint8")
     return clip.fl_image(tint)
 
-def color_bw(clip, **kw): return clip.fx(vfx.blackwhite)
+def color_bw(clip, **kw):
+    return clip.fx(vfx.blackwhite)
 
 def color_high_contrast(clip, **kw):
     def contrast(img):
@@ -198,36 +199,43 @@ def rotate_right_1(clip, **kw): return clip.fx(rotate, -1)
 
 
 # =========================================================
-# REGISTRY
+# REGISTRY  key -> (label, category, function)
 # =========================================================
 EFFECTS = {
+    # Flip
     "flip_horizontal":  ("Flip Horizontal",   "Flip",   flip_horizontal),
     "flip_vertical":    ("Flip Vertical",     "Flip",   flip_vertical),
 
+    # Crop
     "crop_center":      ("Crop Center",       "Crop",   crop_center),
     "crop_left":        ("Crop Left",         "Crop",   crop_left),
     "crop_right":       ("Crop Right",        "Crop",   crop_right),
     "crop_top":         ("Crop Top",          "Crop",   crop_top),
     "crop_bottom":      ("Crop Bottom",       "Crop",   crop_bottom),
 
+    # Speed
     "speed_slowmo_08":  ("Slow-Mo 0.8x",      "Speed",  speed_slowmo_08),
     "speed_fast_12":    ("Fast 1.2x",         "Speed",  speed_fast_12),
     "speed_hyper_15":   ("Hyper 1.5x",        "Speed",  speed_hyper_15),
 
+    # Zoom
     "zoom_in":          ("Zoom In",           "Zoom",   zoom_in),
     "zoom_out":         ("Zoom Out",          "Zoom",   zoom_out),
     "zoom_shake":       ("Shake Zoom",        "Zoom",   zoom_shake),
 
+    # Color
     "color_warmer":     ("Warmer",            "Color",  color_warmer),
     "color_colder":     ("Colder",            "Color",  color_colder),
     "color_bw":         ("Black & White",     "Color",  color_bw),
-    "color_contrast":   ("High Contrast",     "Color",  color_contrast),
+    "color_contrast":   ("High Contrast",     "Color",  color_high_contrast),  # ✅ FIXED
     "color_cyber_neon": ("Cyber Neon",        "Color",  color_cyber_neon),
 
+    # Blur
     "blur_light":       ("Light Blur",        "Blur",   blur_light),
     "blur_heavy":       ("Heavy Blur",        "Blur",   blur_heavy),
     "blur_background":  ("Background Blur",   "Blur",   blur_background),
 
+    # Rotate
     "rotate_left_1":    ("Rotate Left 1°",    "Rotate", rotate_left_1),
     "rotate_right_1":   ("Rotate Right 1°",   "Rotate", rotate_right_1),
 }
@@ -318,17 +326,11 @@ def safe_subclip(clip, start, end):
 
 
 # =========================================================
-# TARGET SIZE (with stability caps)
+# TARGET SIZE
 # =========================================================
 def compute_target_size(source_size):
-    """
-    Enforce a stable target size:
-      - Vertical: between 720x1280 and 1080x1920 (capped at 720p for VPS)
-      - Horizontal: between 1280x720 and 1920x1080 (capped at 720p)
-    """
     w, h = source_size
     if h >= w:
-        # Vertical — target 720x1280 max
         if w > MAX_VERTICAL_W or h > MAX_VERTICAL_H:
             scale = min(MAX_VERTICAL_W / w, MAX_VERTICAL_H / h)
             return (int(w * scale), int(h * scale))
@@ -403,7 +405,7 @@ def remix_video(
     src_fps = source.fps or 24
 
     if duration > LONG_VIDEO_THRESHOLD and quality_preset in ("high", "max", "lossless"):
-        print(f"  ⚡ Long video {duration:.1f}s — downgrading preset")
+        print(f"  ⚡ Long video — downgrading to 'medium'")
         quality_preset = "medium"
 
     q = QUALITY_MAP.get(quality_preset, QUALITY_MAP["high"])
@@ -411,14 +413,12 @@ def remix_video(
     SAFETY = 2.0 / src_fps
     safe_duration = max(0.1, duration - SAFETY)
 
-    print(f"📼 Source: {duration:.3f}s @ {src_fps} fps")
-    print(f"🎯 Quality: {quality_preset} (preset={q['preset']}, CRF={q['crf']})")
+    print(f"📼 {duration:.3f}s @ {src_fps} fps — {quality_preset}")
 
     effect_kwargs = {"crop_top_pct": crop_top_pct, "crop_bottom_pct": crop_bottom_pct}
 
-    # BASE effects
     if base_effects:
-        print(f"🧱 Base effects: {base_effects}")
+        print(f"🧱 Base: {base_effects}")
         for name in base_effects:
             try:
                 source = EFFECTS[name][2](source, **effect_kwargs)
@@ -461,9 +461,8 @@ def remix_video(
 
     total_steps = total_chunks + 2
     target_size = compute_target_size(source.size)
-    print(f"  📐 Target: {target_size[0]}×{target_size[1]}")
+    print(f"  📐 {target_size[0]}×{target_size[1]}")
 
-    # Plan effects
     if clean_windows:
         per_chunk_plan = plan_effects(per_segment_order=clean_windows,
                                       rotate_order=rotate_order, num_chunks=total_chunks)
@@ -489,7 +488,6 @@ def remix_video(
             k = min(effects_per_segment, len(pool))
             per_chunk_plan.append(random.sample(pool, k))
 
-    # Process chunks
     segments = []
     for i, (start, end) in enumerate(chunks):
         report(i + 1, total_steps, f"Segment {i+1}/{total_chunks} ({start:.2f}s → {end:.2f}s)")
@@ -536,16 +534,16 @@ def remix_video(
         audio_codec="aac",
         fps=src_fps,
         preset=q["preset"],
-        audio_bitrate="192k",                    # ← lower bitrate for stability
+        audio_bitrate="192k",
         ffmpeg_params=[
             "-crf", q["crf"],
             "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
-            "-profile:v", "main",                # ← 'main' is more stable than 'high'
+            "-profile:v", "main",
             "-tune", "fastdecode",
-            "-max_muxing_queue_size", "1024",    # ← prevent muxer overflow
+            "-max_muxing_queue_size", "1024",
         ],
-        threads=ENCODE_THREADS,                  # ← 2, stable on 2-core VPS
+        threads=ENCODE_THREADS,
         logger=None,
     )
 
