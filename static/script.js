@@ -93,11 +93,21 @@ function probeVideoDuration(file) {
 function updateTotalSegmentsHint() {
   const hintEl = $("totalSegmentsHint");
   if (!hintEl) return;
-  if ($("motion_aware")?.checked) { hintEl.title = "Motion-aware"; return; }
-  if (!currentVideoDuration) { hintEl.value = 0; return; }
+  if ($("motion_aware")?.checked) {
+    hintEl.title = "Motion-aware mode: segment count depends on scene cuts";
+    return;
+  }
+  if (!currentVideoDuration) {
+    hintEl.value = 0;
+    hintEl.title = "Upload a video or paste a URL to auto-calculate";
+    return;
+  }
   const segLen = parseFloat($("segment_duration")?.value) || 3;
-  const total = Math.max(1, Math.min(500, Math.ceil(currentVideoDuration / segLen)));
+  const rawTotal = Math.ceil(currentVideoDuration / segLen);
+  const total = Math.max(1, Math.min(500, rawTotal));
   hintEl.value = total;
+  hintEl.title = `${currentVideoDuration.toFixed(2)}s ÷ ${segLen}s = ${total} segments`;
+  hintEl.style.color = total > 150 ? "#ef4444" : total > 50 ? "#f59e0b" : "";
 }
 
 $("segment_duration")?.addEventListener("input", updateTotalSegmentsHint);
@@ -116,7 +126,6 @@ function initOrderedList(listId, addSelectId, options = {}) {
     if (!select.value) return;
     addItem(list, select.value, withWindows);
     select.value = "";
-    refreshTimelinePreview();
   });
 
   list.addEventListener("click", (e) => {
@@ -125,25 +134,60 @@ function initOrderedList(listId, addSelectId, options = {}) {
     btn.closest(".ordered-item").remove();
     renumber(list);
   });
+
+  // Drag and drop
+  list.addEventListener("dragstart", (e) => {
+    const item = e.target.closest(".ordered-item");
+    if (!item) return;
+    item.classList.add("dragging");
+  });
+  list.addEventListener("dragend", (e) => {
+    const item = e.target.closest(".ordered-item");
+    if (item) item.classList.remove("dragging");
+  });
+  list.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    const dragging = list.querySelector(".dragging");
+    if (!dragging) return;
+    const after = getDragAfterElement(list, e.clientY);
+    if (after == null) list.appendChild(dragging);
+    else list.insertBefore(dragging, after);
+  });
+}
+
+function getDragAfterElement(container, y) {
+  const items = [...container.querySelectorAll(".ordered-item:not(.dragging)")];
+  return items.reduce((closest, child) => {
+    const box = child.getBoundingClientRect();
+    const offset = y - box.top - box.height / 2;
+    if (offset < 0 && offset > closest.offset) return { offset, element: child };
+    return closest;
+  }, { offset: Number.NEGATIVE_INFINITY }).element;
 }
 
 function addItem(list, key, withWindows = false) {
   const item = document.createElement("div");
   item.className = "ordered-item";
+  item.draggable = true;
   item.dataset.key = key;
   const label = EFFECT_LABELS[key] || key;
 
   if (withWindows) {
     item.innerHTML = `
-      <span class="grip">⋮⋮</span><span class="num"></span>
+      <span class="grip">⋮⋮</span>
+      <span class="num"></span>
       <span class="label">${label}</span>
-      <span class="window">From <input type="number" class="win-from" min="1" placeholder="1"> To <input type="number" class="win-to" min="1" placeholder="last"></span>
-      <button type="button" class="remove">✕</button>`;
+      <span class="window">
+        From <input type="number" class="win-from" min="1" max="500" placeholder="1" />
+        To <input type="number" class="win-to" min="1" max="500" placeholder="last" />
+      </span>
+      <button type="button" class="remove" title="Remove">✕</button>`;
   } else {
     item.innerHTML = `
-      <span class="grip">⋮⋮</span><span class="num"></span>
+      <span class="grip">⋮⋮</span>
+      <span class="num"></span>
       <span class="label">${label}</span>
-      <button type="button" class="remove">✕</button>`;
+      <button type="button" class="remove" title="Remove">✕</button>`;
   }
   list.appendChild(item);
   renumber(list);
@@ -155,14 +199,16 @@ function renumber(list) {
   });
 }
 
-function refreshTimelinePreview() { /* placeholder for compatibility */ }
-
 initOrderedList("baseList", "baseAdd");
 initOrderedList("segList",  "segAdd", { withWindows: true });
 
+// =========================================================
+// WINDOW HELPERS
+// =========================================================
 function getBaseKeys() {
   return [...document.querySelectorAll("#baseList .ordered-item")].map(i => i.dataset.key);
 }
+
 function getEffectWindows() {
   const out = [];
   document.querySelectorAll("#segList .ordered-item").forEach(el => {
@@ -174,6 +220,9 @@ function getEffectWindows() {
   return out;
 }
 
+// =========================================================
+// SELECT ALL / NONE
+// =========================================================
 $("selectAll")?.addEventListener("click", (e) => {
   e.preventDefault();
   document.querySelectorAll("input[name=effects]").forEach(cb => cb.checked = true);
@@ -183,6 +232,9 @@ $("selectNone")?.addEventListener("click", (e) => {
   document.querySelectorAll("input[name=effects]").forEach(cb => cb.checked = false);
 });
 
+// =========================================================
+// CONDITIONAL FIELDS
+// =========================================================
 $("group_by_category")?.addEventListener("change", e => {
   $("runLengthField").style.display = e.target.checked ? "block" : "none";
 });
@@ -191,7 +243,7 @@ $("motion_aware")?.addEventListener("change", e => {
 });
 
 // =========================================================
-// SINGLE VIDEO — file picker + fetch + remix
+// FILE PICKER
 // =========================================================
 fileInput?.addEventListener("change", (e) => {
   if (e.target.files.length) setFile(e.target.files[0]);
@@ -208,16 +260,21 @@ dropZone?.addEventListener("drop", (e) => {
 });
 
 function setFile(file) {
-  if (!file.type.startsWith("video/")) { showError("Video file required"); return; }
+  if (!file.type.startsWith("video/")) { showError("Please choose a video file."); return; }
   selectedFile = file;
-  stagedToken = null; stagedPreviewUrl = null;
+  stagedToken = null;
+  stagedPreviewUrl = null;
   if (originalUrl?.startsWith("blob:")) URL.revokeObjectURL(originalUrl);
   originalUrl = URL.createObjectURL(file);
   const mb = (file.size / 1024 / 1024).toFixed(2);
   fileInfo.textContent = `📁 ${file.name} · ${mb} MB`;
   fileInfo.classList.remove("hidden");
   remixBtn.disabled = false;
-  probeVideoDuration(file).then(d => { currentVideoDuration = d; updateTotalSegmentsHint(); });
+  hideError();
+  probeVideoDuration(file).then((dur) => {
+    currentVideoDuration = dur;
+    updateTotalSegmentsHint();
+  });
   showOriginalPreview();
 }
 
@@ -227,66 +284,122 @@ function showOriginalPreview() {
   viewToggle.classList.add("hidden");
   const src = originalUrl || stagedPreviewUrl;
   if (!src) return;
-  originalVideo.src = src; sliderOriginal.src = src; singleVideo.src = src;
+  originalVideo.src = src;
+  sliderOriginal.src = src;
+  singleVideo.src = src;
   setView("single");
 }
 
+// =========================================================
+// FETCH FROM URL
+// =========================================================
 $("fetchUrlBtn")?.addEventListener("click", async () => {
   const url = $("videoUrl").value.trim();
-  if (!url) return showError("Paste URL first.");
+  if (!url) { showError("Paste a video URL first."); return; }
+  if (!/^https?:\/\//i.test(url)) { showError("URL must start with http:// or https://"); return; }
+
+  hideError();
+  progressWrap.classList.remove("hidden");
+  setProgress(5, "Resolving & downloading…");
+
   const fd = new FormData();
   fd.append("video_url", url);
+
   try {
-    const r = await fetch("/fetch_url", { method: "POST", body: fd });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.error || "Failed");
+    const res = await fetch("/fetch_url", { method: "POST", body: fd });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Fetch failed");
+
     selectedFile = null;
     if (originalUrl?.startsWith("blob:")) URL.revokeObjectURL(originalUrl);
     originalUrl = null;
-    stagedToken = d.token;
-    stagedPreviewUrl = d.preview_url;
-    currentVideoDuration = d.duration || 0;
+
+    stagedToken = data.token;
+    stagedPreviewUrl = data.preview_url;
+    currentVideoDuration = data.duration || 0;
     updateTotalSegmentsHint();
+
     placeholder.classList.add("hidden");
     compareArea.classList.remove("hidden");
     viewToggle.classList.add("hidden");
-    originalVideo.src = d.preview_url; sliderOriginal.src = d.preview_url; singleVideo.src = d.preview_url;
-    previewVideo.src = d.preview_url; sliderRemix.src = d.preview_url;
+
+    originalVideo.src = data.preview_url;
+    sliderOriginal.src = data.preview_url;
+    singleVideo.src = data.preview_url;
+    previewVideo.src = data.preview_url;
+    sliderRemix.src = data.preview_url;
     setView("single");
-    fileInfo.textContent = `🌐 Fetched: ${d.input_name}`;
+
+    fileInfo.textContent = `🌐 Fetched: ${data.input_name} · ${currentVideoDuration.toFixed(2)}s`;
     fileInfo.classList.remove("hidden");
+
     remixBtn.disabled = false;
-  } catch (err) { showError(err.message); }
+    progressWrap.classList.add("hidden");
+    hideError();
+  } catch (err) {
+    resetUI();
+    showError(err.message);
+  }
 });
 
+// =========================================================
+// REMIX
+// =========================================================
 remixBtn?.addEventListener("click", async () => {
   if (stagedToken) return runRemixOnStaged();
-  if (selectedFile) return stageUploadAndRemix();
-  showError("Choose a video first.");
+  if (selectedFile)  return stageUploadAndRemix();
+  showError("Upload a video, paste a URL, or choose a file first.");
 });
 
 async function runRemixOnStaged() {
+  hideError();
+  resultActions.classList.add("hidden");
+  progressWrap.classList.remove("hidden");
+  setProgress(5, "Starting remix…");
+  remixBtn.disabled = true;
+  remixBtn.textContent = "⏳ Working…";
+
   const fd = buildOptionsFormData();
-  const r = await fetch(`/remix/${stagedToken}`, { method: "POST", body: fd });
-  const d = await r.json();
-  if (!r.ok) return showError(d.error);
-  currentJobId = d.job_id;
-  stagedToken = null;
-  pollStatus();
+
+  try {
+    const res = await fetch(`/remix/${stagedToken}`, { method: "POST", body: fd });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Remix failed");
+    currentJobId = data.job_id;
+    stagedToken = null;
+    pollStatus();
+  } catch (err) {
+    resetUI();
+    showError(err.message);
+  }
 }
 
 async function stageUploadAndRemix() {
+  hideError();
+  resultActions.classList.add("hidden");
+  progressWrap.classList.remove("hidden");
+  setProgress(5, "Uploading…");
+  remixBtn.disabled = true;
+  remixBtn.textContent = "⏳ Uploading…";
+
   const up = new FormData();
   up.append("video", selectedFile);
-  const r = await fetch("/stage_upload", { method: "POST", body: up });
-  const d = await r.json();
-  if (!r.ok) return showError(d.error);
-  const fd = buildOptionsFormData();
-  const r2 = await fetch(`/remix/${d.token}`, { method: "POST", body: fd });
-  const d2 = await r2.json();
-  if (!r2.ok) return showError(d2.error);
-  currentJobId = d2.job_id;
-  pollStatus();
+
+  try {
+    const res = await fetch("/stage_upload", { method: "POST", body: up });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Upload failed");
+    setProgress(20, "Starting remix…");
+    const fd = buildOptionsFormData();
+    const res2 = await fetch(`/remix/${data.token}`, { method: "POST", body: fd });
+    const data2 = await res2.json();
+    if (!res2.ok) throw new Error(data2.error || "Remix failed");
+    currentJobId = data2.job_id;
+    pollStatus();
+  } catch (err) {
+    resetUI();
+    showError(err.message);
+  }
 }
 
 function buildOptionsFormData() {
@@ -297,7 +410,20 @@ function buildOptionsFormData() {
   fd.append("crop_top_pct", $("crop_top_pct").value);
   fd.append("crop_bottom_pct", $("crop_bottom_pct").value);
   fd.append("quality_preset", $("quality_preset").value);
-  document.querySelectorAll("input[name=effects]:checked").forEach(cb => fd.append("effects", cb.value));
+
+  const gbc = $("group_by_category");
+  if (gbc?.checked) {
+    fd.append("group_by_category", "1");
+    fd.append("category_run_length", $("category_run_length").value);
+  }
+  const ma = $("motion_aware");
+  if (ma?.checked) {
+    fd.append("motion_aware", "1");
+    fd.append("scene_threshold", $("scene_threshold").value);
+  }
+
+  document.querySelectorAll("input[name=effects]:checked").forEach(cb =>
+    fd.append("effects", cb.value));
   getBaseKeys().forEach(k => fd.append("base_effects", k));
   const windows = getEffectWindows();
   if (windows.length) fd.append("effect_windows", JSON.stringify(windows));
@@ -305,75 +431,142 @@ function buildOptionsFormData() {
   return fd;
 }
 
+// =========================================================
+// POLLING
+// =========================================================
 function pollStatus() {
   clearInterval(pollTimer);
   pollTimer = setInterval(async () => {
-    const r = await fetch(`/status/${currentJobId}`);
-    const d = await r.json();
-    setProgress(d.progress, d.message);
-    if (d.status === "done") {
+    try {
+      const res = await fetch(`/status/${currentJobId}`);
+      const data = await res.json();
+      setProgress(data.progress, data.message);
+      if (data.status === "done") {
+        clearInterval(pollTimer);
+        showResult(data.preview_url, data.download_url, data.original_url);
+      } else if (data.status === "error") {
+        clearInterval(pollTimer);
+        resetUI();
+        showError(data.message);
+      }
+    } catch (err) {
       clearInterval(pollTimer);
-      showResult(d.preview_url, d.download_url, d.original_url);
-    } else if (d.status === "error") {
-      clearInterval(pollTimer);
-      showError(d.message);
+      resetUI();
+      showError("Lost connection to server.");
     }
   }, 800);
 }
 
+// =========================================================
+// RESULT
+// =========================================================
 function showResult(previewUrl, downloadUrl, originalUrlFromServer) {
   setProgress(100, "✅ Done!");
   setTimeout(() => progressWrap.classList.add("hidden"), 900);
   compareArea.classList.remove("hidden");
   viewToggle.classList.remove("hidden");
-  previewVideo.src = previewUrl; sliderRemix.src = previewUrl; singleVideo.src = previewUrl;
-  const src = originalUrlFromServer || originalUrl || stagedPreviewUrl;
-  if (src) { originalVideo.src = src; sliderOriginal.src = src; }
+
+  previewVideo.src = previewUrl;
+  sliderRemix.src = previewUrl;
+  singleVideo.src = previewUrl;
+
+  if (originalUrlFromServer) {
+    originalVideo.src = originalUrlFromServer;
+    sliderOriginal.src = originalUrlFromServer;
+  } else if (originalUrl) {
+    originalVideo.src = originalUrl;
+    sliderOriginal.src = originalUrl;
+  } else if (stagedPreviewUrl) {
+    originalVideo.src = stagedPreviewUrl;
+    sliderOriginal.src = stagedPreviewUrl;
+  }
+
   setView("side");
-  wireSideBySideSync(); wireSliderOverlay(); wireSliderControls();
+  wireSideBySideSync();
+  wireSliderOverlay();
+  wireSliderControls();
+
   downloadBtn.href = downloadUrl;
   resultActions.classList.remove("hidden");
-  let p = document.getElementById("publishYtBtn");
-  if (!p) {
-    p = document.createElement("button");
-    p.id = "publishYtBtn"; p.className = "secondary"; p.textContent = "📤 Publish to YouTube";
-    resultActions.appendChild(p);
+
+  let publishBtn = document.getElementById("publishYtBtn");
+  if (!publishBtn) {
+    publishBtn = document.createElement("button");
+    publishBtn.id = "publishYtBtn";
+    publishBtn.className = "secondary";
+    publishBtn.textContent = "📤 Publish to YouTube";
+    resultActions.appendChild(publishBtn);
   }
-  p.onclick = () => onPublishToYouTube(p);
+  publishBtn.onclick = () => onPublishToYouTube(publishBtn);
+
+  remixBtn.disabled = false;
+  remixBtn.textContent = "🚀 Remix It!";
 }
 
-async function onPublishToYouTube(btn) {
+async function onPublishToYouTube(publishBtn) {
   const title = prompt("YouTube title:", "My Remix Short");
   if (!title) return;
-  const r = await fetch(`/publish_to_youtube/${currentJobId}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title, caption: title }),
-  });
-  const d = await r.json();
-  if (d.error) alert("❌ " + (d.error.message || d.error));
-  else alert("✅ Queued to Buffer!");
+  const description = prompt("Description (optional):", title) || title;
+  const originalText = publishBtn.textContent;
+  publishBtn.disabled = true;
+  publishBtn.textContent = "⏳ Publishing…";
+  try {
+    const res = await fetch(`/publish_to_youtube/${currentJobId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title, caption: description }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+    alert("✅ Added to Buffer queue for YouTube!");
+  } catch (err) {
+    alert("❌ Publish failed:\n" + err.message);
+  } finally {
+    publishBtn.disabled = false;
+    publishBtn.textContent = originalText;
+  }
 }
 
 // =========================================================
-// VIEW SWITCHER + SLIDER + SYNC
+// VIEW SWITCHER
 // =========================================================
+viewToggle?.querySelectorAll(".tab").forEach(btn => {
+  btn.addEventListener("click", () => setView(btn.dataset.view));
+});
+
 function setView(view) {
   currentView = view;
-  viewToggle.querySelectorAll(".tab").forEach(b => b.classList.toggle("active", b.dataset.view === view));
-  $("sideView").classList.toggle("active", view === "side");
-  $("sliderView").classList.toggle("active", view === "slider");
-  $("singleView").classList.toggle("active", view === "single");
+  viewToggle?.querySelectorAll(".tab").forEach(b =>
+    b.classList.toggle("active", b.dataset.view === view));
+  $("sideView")?.classList.toggle("active", view === "side");
+  $("sliderView")?.classList.toggle("active", view === "slider");
+  $("singleView")?.classList.toggle("active", view === "single");
+  pauseAll();
+}
+
+function pauseAll() {
+  [originalVideo, previewVideo, sliderOriginal, sliderRemix, singleVideo]
+    .forEach(v => v && v.pause());
 }
 
 function wireSideBySideSync() {
-  const sync = (s, d) => { if (Math.abs(s.currentTime - d.currentTime) > 0.2) d.currentTime = s.currentTime; };
-  originalVideo.ontimeupdate = () => { if (currentView === "side" && !originalVideo.paused) sync(originalVideo, previewVideo); };
-  previewVideo.ontimeupdate = () => { if (currentView === "side" && !previewVideo.paused) sync(previewVideo, originalVideo); };
-  originalVideo.onplay = () => previewVideo.play().catch(()=>{});
-  previewVideo.onplay  = () => originalVideo.play().catch(()=>{});
-  originalVideo.onpause = () => previewVideo.pause();
-  previewVideo.onpause  = () => originalVideo.pause();
+  const sync = (src, dst) => {
+    if (Math.abs(src.currentTime - dst.currentTime) > 0.2) dst.currentTime = src.currentTime;
+  };
+  if (originalVideo) {
+    originalVideo.ontimeupdate = () => {
+      if (currentView === "side" && !originalVideo.paused) sync(originalVideo, previewVideo);
+    };
+    originalVideo.onplay = () => previewVideo?.play().catch(() => {});
+    originalVideo.onpause = () => previewVideo?.pause();
+  }
+  if (previewVideo) {
+    previewVideo.ontimeupdate = () => {
+      if (currentView === "side" && !previewVideo.paused) sync(previewVideo, originalVideo);
+    };
+    previewVideo.onplay = () => originalVideo?.play().catch(() => {});
+    previewVideo.onpause = () => originalVideo?.pause();
+  }
 }
 
 function wireSliderOverlay() {
@@ -386,24 +579,50 @@ function wireSliderOverlay() {
     const r = sliderContainer.getBoundingClientRect();
     return ((x - r.left) / r.width) * 100;
   };
-  sliderHandle.onmousedown = (e) => { sliderDragging = true; e.preventDefault(); };
-  sliderContainer.onmousedown = (e) => { sliderDragging = true; setSplit(getPct(e.clientX)); };
-  window.onmousemove = (e) => { if (sliderDragging) setSplit(getPct(e.clientX)); };
-  window.onmouseup = () => sliderDragging = false;
+  sliderHandle.addEventListener("mousedown", (e) => { sliderDragging = true; e.preventDefault(); });
+  sliderContainer.addEventListener("mousedown", (e) => { sliderDragging = true; setSplit(getPct(e.clientX)); });
+  window.addEventListener("mousemove", (e) => { if (sliderDragging) setSplit(getPct(e.clientX)); });
+  window.addEventListener("mouseup", () => sliderDragging = false);
   setSplit(50);
 }
 
-function wireSliderControls() { /* minimal */ }
+function wireSliderControls() {
+  if (!sliderPlayBtn) return;
+  const play = () => {
+    sliderOriginal.currentTime = sliderRemix.currentTime;
+    sliderOriginal.play().catch(() => {});
+    sliderRemix.play().catch(() => {});
+    sliderPlayBtn.textContent = "⏸";
+  };
+  const pause = () => {
+    sliderOriginal.pause(); sliderRemix.pause();
+    sliderPlayBtn.textContent = "▶";
+  };
+  sliderPlayBtn.onclick = () => { if (sliderRemix.paused) play(); else pause(); };
+}
 
+// =========================================================
+// PROGRESS / ERROR
+// =========================================================
 function setProgress(pct, msg) {
   progressFill.style.width = pct + "%";
   if (msg) progressText.textContent = msg;
 }
-function showError(msg) { errorBox.textContent = "⚠️ " + msg; errorBox.classList.remove("hidden"); }
+function resetUI() {
+  remixBtn.disabled = false;
+  remixBtn.textContent = "🚀 Remix It!";
+  progressWrap.classList.add("hidden");
+}
+function showError(msg) {
+  errorBox.textContent = "⚠️ " + msg;
+  errorBox.classList.remove("hidden");
+}
 function hideError() { errorBox.classList.add("hidden"); }
 
+againBtn?.addEventListener("click", () => remixBtn.click());
+
 // =========================================================
-// CSV MANAGER
+// CSV UPLOAD MANAGER
 // =========================================================
 (function() {
   const dropZone = document.getElementById("csvDropZone");
@@ -412,37 +631,53 @@ function hideError() { errorBox.classList.add("hidden"); }
   const fileListEl = document.getElementById("csvFileList");
   if (!dropZone || !fileInput) return;
 
-  function setResult(msg, cls = "") { resultEl.textContent = msg; resultEl.className = "ai-status " + cls; }
-  function escapeHtml(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]); }
+  function setResult(msg, cls = "") {
+    resultEl.textContent = msg;
+    resultEl.className = "ai-status " + cls;
+  }
+  function escapeHtml(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, c =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+  }
 
   async function loadFileList() {
     try {
       const r = await fetch("/api/groups");
       const d = await r.json();
       if (!d.success) return;
-      if (!d.groups?.length) { fileListEl.innerHTML = '<div style="color:var(--muted)">No CSVs yet.</div>'; return; }
+      if (!d.groups?.length) {
+        fileListEl.innerHTML = '<div style="color:var(--muted)">No CSVs uploaded yet.</div>';
+        return;
+      }
       fileListEl.innerHTML = d.groups.map(g => `
         <div class="csv-file-item">
-          <span class="name">${escapeHtml(g.name)}.csv</span>
+          <span class="name" title="${escapeHtml(g.name)}.csv">${escapeHtml(g.name)}.csv</span>
           <span class="count">${g.count}</span>
           <button type="button" class="del" data-name="${escapeHtml(g.name)}">✕</button>
         </div>`).join("");
-      fileListEl.querySelectorAll(".del").forEach(b => b.onclick = () => deleteFile(b.dataset.name));
+      fileListEl.querySelectorAll(".del").forEach(b => {
+        b.onclick = () => deleteFile(b.dataset.name);
+      });
     } catch (e) {}
   }
 
   async function uploadFiles(files) {
     const csvs = [...files].filter(f => f.name.toLowerCase().endsWith(".csv"));
     if (!csvs.length) return setResult("No CSVs selected", "error");
-    setResult(`📤 Uploading ${csvs.length}…`, "working");
+    setResult(`📤 Uploading ${csvs.length} file(s)…`, "working");
     const fd = new FormData();
     csvs.forEach(f => fd.append("files", f));
     try {
       const r = await fetch("/api/upload_csv", { method: "POST", body: fd });
       const d = await r.json();
-      setResult(`✅ Uploaded ${d.uploaded.length}`, "ok");
+      if (!d.success) throw new Error(d.error || "Upload failed");
+      const ok = (d.uploaded || []).length;
+      const fail = (d.failed || []).length;
+      setResult(`✅ Uploaded ${ok}${fail ? ` · ❌ ${fail} failed` : ""}`, fail ? "error" : "ok");
       loadFileList();
-    } catch (e) { setResult("❌ " + e.message, "error"); }
+    } catch (e) {
+      setResult("❌ " + e.message, "error");
+    }
   }
 
   async function deleteFile(name) {
@@ -451,17 +686,26 @@ function hideError() { errorBox.classList.add("hidden"); }
     loadFileList();
   }
 
-  fileInput.onchange = (e) => { if (e.target.files.length) uploadFiles(e.target.files); fileInput.value = ""; };
+  fileInput.onchange = (e) => {
+    if (e.target.files.length) uploadFiles(e.target.files);
+    fileInput.value = "";
+  };
   dropZone.ondragover = (e) => { e.preventDefault(); dropZone.classList.add("drag"); };
   dropZone.ondragleave = () => dropZone.classList.remove("drag");
-  dropZone.ondrop = (e) => { e.preventDefault(); dropZone.classList.remove("drag"); if (e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files); };
+  dropZone.ondrop = (e) => {
+    e.preventDefault();
+    dropZone.classList.remove("drag");
+    if (e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files);
+  };
 
   document.getElementById("csvRefreshBtn")?.addEventListener("click", loadFileList);
   document.getElementById("csvDeleteAllBtn")?.addEventListener("click", async () => {
-    if (!confirm("Delete ALL CSVs?")) return;
+    if (!confirm("Delete ALL CSVs from server?")) return;
     const r = await fetch("/api/groups");
     const d = await r.json();
-    for (const g of d.groups || []) await fetch(`/api/delete_csv/${encodeURIComponent(g.name)}`, { method: "POST" });
+    for (const g of d.groups || []) {
+      await fetch(`/api/delete_csv/${encodeURIComponent(g.name)}`, { method: "POST" });
+    }
     loadFileList();
   });
 
@@ -469,68 +713,122 @@ function hideError() { errorBox.classList.add("hidden"); }
 })();
 
 // =========================================================
-// AI ONE-BY-ONE + BATCH
+// AI QUEUE (one-by-one processing)
 // =========================================================
 (function() {
   const groupSelect = document.getElementById("aiGroupSelect");
   const queueEl = document.getElementById("aiQueue");
   const statusEl = document.getElementById("aiStatus");
   const statsEl = document.getElementById("aiStats");
+  const progressPanel = document.getElementById("aiProgressPanel");
+  const currentTitleEl = document.getElementById("aiCurrentTitle");
+  const currentProgEl = document.getElementById("aiCurrentProgress");
+  const currentStatusEl = document.getElementById("aiCurrentStatus");
+  const stepsEl = document.getElementById("aiSteps");
   if (!queueEl) return;
 
   let queue = [];
   let selectedIdx = 0;
   let isProcessing = false;
-  let batchRunning = false;
-  let batchAbort = false;
 
-  function escapeHtml(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]); }
-  function setStatus(m, cls = "") { statusEl.textContent = m; statusEl.className = "ai-status " + cls; }
+  function escapeHtml(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, c =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+  }
+  function setStatus(m, cls = "") {
+    statusEl.textContent = m;
+    statusEl.className = "ai-status " + cls;
+  }
+  function setCurrentProgress(pct, msg) {
+    if (currentProgEl) currentProgEl.style.width = pct + "%";
+    if (msg && currentStatusEl) currentStatusEl.textContent = msg;
+  }
+  function setStep(step, state) {
+    stepsEl?.querySelectorAll(".ai-step").forEach(el => {
+      if (el.dataset.step === step) {
+        el.classList.remove("active", "done", "error");
+        if (state) el.classList.add(state);
+      }
+    });
+  }
 
   async function refreshGroups() {
-    const r = await fetch("/api/groups");
-    const d = await r.json();
-    if (!d.success) return;
-    groupSelect.innerHTML = '<option value="">— Select a group —</option>' +
-      d.groups.map(g => `<option value="${escapeHtml(g.name)}">${escapeHtml(g.name)} (${g.count})</option>`).join("");
+    try {
+      const r = await fetch("/api/groups");
+      const d = await r.json();
+      if (!d.success) return;
+      groupSelect.innerHTML = '<option value="">— Select a group —</option>' +
+        d.groups.map(g => `<option value="${escapeHtml(g.name)}">${escapeHtml(g.name)} (${g.count})</option>`).join("");
+    } catch (e) {}
   }
 
   async function loadGroup(name) {
-    if (!name) return;
-    const r = await fetch(`/api/groups/${encodeURIComponent(name)}`);
-    const d = await r.json();
-    if (!d.success) return;
-    const items = d.items.map(it => ({
-      id: it.id || Math.random().toString(36).slice(2, 10),
-      url: it.url, group: name,
-      rawTitle: it.title || "", rawDescription: it.description || "",
-      aiTitle: "", aiCaption: "", aiDescription: "", aiHashtags: "",
-      status: "pending", error: null, jobId: null, remixUrl: null, publishError: null,
-    }));
-    queue = queue.concat(items);
-    renderQueue();
-    setStatus(`📥 Loaded ${items.length} items from ${name}`, "ok");
+    if (!name) { setStatus("Select a group first.", "error"); return; }
+    setStatus(`📥 Loading ${name}…`, "working");
+    try {
+      const r = await fetch(`/api/groups/${encodeURIComponent(name)}`);
+      const d = await r.json();
+      if (!d.success) throw new Error(d.error || "Load failed");
+      const items = d.items.map(it => ({
+        id: it.id || Math.random().toString(36).slice(2, 10),
+        url: it.url, group: name,
+        rawTitle: it.title || "", rawDescription: it.description || "",
+        aiTitle: "", aiCaption: "", aiDescription: "", aiHashtags: "",
+        status: "pending", error: null, jobId: null, remixUrl: null, publishError: null,
+      }));
+      queue = queue.concat(items);
+      const firstPending = queue.findIndex(i => i.status === "pending");
+      if (firstPending !== -1) selectedIdx = firstPending;
+      renderQueue();
+      setStatus(`📥 Loaded ${items.length} item(s) from ${name}`, "ok");
+    } catch (e) {
+      setStatus("❌ " + e.message, "error");
+    }
   }
 
   function renderQueue() {
-    if (!queue.length) { queueEl.innerHTML = '<div style="color:var(--muted)">Queue empty</div>'; statsEl.innerHTML = ""; return; }
-    const counts = { pending: 0, done: 0, error: 0, remixed: 0, published: 0 };
+    if (!queue.length) {
+      queueEl.innerHTML = '<div style="color:var(--muted);font-size:0.8rem">Queue empty — load a group or paste manually.</div>';
+      if (statsEl) statsEl.innerHTML = "";
+      return;
+    }
+    const counts = { pending: 0, done: 0, error: 0, remixed: 0, published: 0, processing: 0, remixing: 0, publishing: 0 };
     queue.forEach(i => counts[i.status] = (counts[i.status] || 0) + 1);
-    statsEl.innerHTML = `
+    if (statsEl) statsEl.innerHTML = `
       <div class="stat"><strong>${queue.length}</strong>Total</div>
-      <div class="stat"><strong>${counts.pending || 0}</strong>Pending</div>
-      <div class="stat"><strong>${counts.published || 0}</strong>Published</div>
-      <div class="stat"><strong>${counts.error || 0}</strong>Errors</div>`;
-    queueEl.innerHTML = queue.map((item, idx) => `
-      <div class="ai-item status-${item.status} ${idx === selectedIdx ? "current" : ""}" data-idx="${idx}">
-        <div class="ai-row">
-          <span class="ai-group">${escapeHtml(item.group)} · #${idx+1}</span>
-          <span class="ai-status-badge">${item.status}</span>
-        </div>
-        <div class="ai-url">${escapeHtml(item.url)}</div>
-        ${item.aiTitle ? `<div class="ai-result"><strong>${escapeHtml(item.aiTitle)}</strong></div>` : ""}
-        ${item.error ? `<div class="ai-result error">❌ ${escapeHtml(item.error)}</div>` : ""}
-      </div>`).join("");
+      <div class="stat"><strong>${counts.pending}</strong>Pending</div>
+      <div class="stat"><strong>${counts.done}</strong>AI Done</div>
+      <div class="stat"><strong>${counts.remixed + counts.publishing}</strong>Remixed</div>
+      <div class="stat"><strong>${counts.published}</strong>Published</div>
+      <div class="stat"><strong>${counts.error}</strong>Errors</div>
+    `;
+
+    queueEl.innerHTML = queue.map((item, idx) => {
+      const labels = {
+        pending: "⏳ Pending", processing: "🤖 AI…", done: "✅ AI Ready",
+        error: "❌ Error", remixing: "🎬 Remixing", remixed: "✅ Remixed",
+        publishing: "📤 Publishing", published: "🚀 Published",
+      };
+      let body = "";
+      if (!item.aiTitle && item.rawTitle) {
+        body += `<div class="ai-title">${escapeHtml(item.rawTitle)}</div>`;
+      }
+      if (item.aiTitle) {
+        body += `<div class="ai-result"><strong>${escapeHtml(item.aiTitle)}</strong></div>`;
+      }
+      if (item.error) {
+        body += `<div class="ai-result error">❌ ${escapeHtml(item.error)}</div>`;
+      }
+      return `
+        <div class="ai-item status-${item.status} ${idx === selectedIdx ? "current" : ""}" data-idx="${idx}">
+          <div class="ai-row">
+            <span class="ai-group">${escapeHtml(item.group)} · #${idx + 1}</span>
+            <span class="ai-status-badge">${labels[item.status] || item.status}</span>
+          </div>
+          <div class="ai-url">${escapeHtml(item.url)}</div>
+          ${body}
+        </div>`;
+    }).join("");
   }
 
   async function processOne(idx) {
@@ -539,24 +837,51 @@ function hideError() { errorBox.classList.add("hidden"); }
     const item = queue[idx];
     if (!item) { isProcessing = false; return; }
     selectedIdx = idx;
+    progressPanel?.classList.remove("hidden");
+    if (currentTitleEl) {
+      currentTitleEl.textContent = (item.rawTitle || item.url).slice(0, 60);
+    }
+    stepsEl?.querySelectorAll(".ai-step").forEach(el => el.classList.remove("active", "done", "error"));
+
     try {
-      // AI
+      // AI step
       if (!item.aiTitle) {
-        item.status = "processing"; renderQueue();
-        const r = await fetch("/api/ai/reformat", { method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ title: item.rawTitle, description: item.rawDescription }) });
+        setStep("ai", "active");
+        setCurrentProgress(10, "🤖 Generating AI content…");
+        item.status = "processing";
+        renderQueue();
+        const r = await fetch("/api/ai/reformat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: item.rawTitle, description: item.rawDescription }),
+        });
         const d = await r.json();
-        if (!d.success) throw new Error(d.error);
-        item.aiTitle = d.parsed.title; item.aiCaption = d.parsed.caption;
-        item.aiDescription = d.parsed.description; item.aiHashtags = d.parsed.hashtags;
+        if (!r.ok || !d.success) throw new Error(d.error || "AI failed");
+        item.aiTitle = d.parsed.title || "";
+        item.aiCaption = d.parsed.caption || "";
+        item.aiDescription = d.parsed.description || "";
+        item.aiHashtags = d.parsed.hashtags || "";
+        item.status = "done";
+        setStep("ai", "done");
+      } else {
+        setStep("ai", "done");
       }
-      // Fetch
-      item.status = "remixing"; renderQueue();
-      const fd = new FormData(); fd.append("video_url", item.url);
+
+      // Fetch step
+      setStep("fetch", "active");
+      setCurrentProgress(30, "📥 Fetching video…");
+      item.status = "remixing";
+      renderQueue();
+      const fd = new FormData();
+      fd.append("video_url", item.url);
       const r1 = await fetch("/fetch_url", { method: "POST", body: fd });
       const d1 = await r1.json();
-      if (!d1.success) throw new Error(d1.error);
-      // Remix
+      if (!r1.ok) throw new Error(d1.error || "Fetch failed");
+      setStep("fetch", "done");
+
+      // Remix step
+      setStep("remix", "active");
+      setCurrentProgress(50, "🎬 Starting remix…");
       const fd2 = new FormData();
       fd2.append("segment_duration", "3");
       fd2.append("effects_per_segment", "3");
@@ -566,145 +891,309 @@ function hideError() { errorBox.classList.add("hidden"); }
       fd2.append("source_url", item.url);
       const r2 = await fetch(`/remix/${d1.token}`, { method: "POST", body: fd2 });
       const d2 = await r2.json();
-      if (!d2.job_id) throw new Error("Remix failed");
+      if (!r2.ok) throw new Error(d2.error || "Remix failed");
       item.jobId = d2.job_id;
-      // Poll
-      let ok = false;
+
+      let remixDone = false;
       for (let i = 0; i < 400; i++) {
-        await new Promise(r => setTimeout(r, 1500));
+        await new Promise(res => setTimeout(res, 1500));
         const sr = await fetch(`/status/${item.jobId}`);
         const sd = await sr.json();
-        if (sd.status === "done") { ok = true; item.remixUrl = sd.preview_url; break; }
-        if (sd.status === "error") throw new Error(sd.message);
+        const pct = 50 + Math.round((sd.progress || 0) * 0.3);
+        setCurrentProgress(pct, `🎬 Remixing… ${sd.progress || 0}%`);
+        if (sd.status === "done") { remixDone = true; item.remixUrl = sd.preview_url; break; }
+        if (sd.status === "error") throw new Error(sd.message || "Remix error");
       }
-      if (!ok) throw new Error("Timeout");
-      // Publish
-      item.status = "publishing"; renderQueue();
+      if (!remixDone) throw new Error("Remix timeout");
+      setStep("remix", "done");
+
+      // Publish step
+      setStep("publish", "active");
+      setCurrentProgress(85, "📤 Publishing to YouTube…");
+      item.status = "publishing";
+      renderQueue();
       const r3 = await fetch(`/publish_to_youtube/${item.jobId}`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: item.aiTitle, caption: item.aiCaption }),
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: item.aiTitle || item.rawTitle,
+          caption: item.aiCaption || item.rawDescription,
+        }),
       });
       const d3 = await r3.json();
-      if (d3.error) { item.status = "remixed"; item.publishError = d3.error.message || d3.error; }
-      else { item.status = "published"; }
+      if (!r3.ok || d3.error) {
+        item.status = "remixed";
+        item.publishError = d3.error || "Publish failed";
+        setStep("publish", "error");
+      } else {
+        item.status = "published";
+        setStep("publish", "done");
+      }
+      setCurrentProgress(100, "🏁 Done");
     } catch (err) {
-      item.status = "error"; item.error = err.message;
+      item.status = "error";
+      item.error = err.message;
     } finally {
       renderQueue();
       isProcessing = false;
+      setTimeout(() => progressPanel?.classList.add("hidden"), 5000);
     }
-  }
-
-  async function runBatch() {
-    if (batchRunning) return;
-    const cooldownMin = parseInt(document.getElementById("batchCooldown").value) || 30;
-    const cooldownMs = cooldownMin * 60 * 1000;
-    const perSession = document.getElementById("batchGroupsPerSession").value;
-
-    const r = await fetch("/api/groups");
-    const d = await r.json();
-    let groups = d.groups.map(g => g.name);
-    const publishedGroups = new Set(queue.filter(q => q.status === "published").map(q => q.group));
-    groups = groups.filter(g => !publishedGroups.has(g));
-    if (perSession) groups = groups.slice(0, parseInt(perSession));
-
-    if (!groups.length) return setStatus("All done!", "ok");
-    if (!confirm(`Process ${groups.length} groups with ${cooldownMin} min cooldown?`)) return;
-
-    batchRunning = true;
-    batchAbort = false;
-    document.getElementById("aiBatchStartBtn").style.display = "none";
-    document.getElementById("aiBatchStopBtn").style.display = "inline-flex";
-
-    for (let gi = 0; gi < groups.length; gi++) {
-      if (batchAbort) break;
-      const groupName = groups[gi];
-      setStatus(`📥 Group ${gi+1}/${groups.length}: ${groupName}`, "working");
-
-      await loadGroup(groupName);
-      const groupItems = queue.filter(q => q.group === groupName && (q.status === "pending" || q.status === "error"));
-      for (let i = 0; i < groupItems.length; i++) {
-        if (batchAbort) break;
-        setStatus(`🎬 ${groupName}: item ${i+1}/${groupItems.length}`, "working");
-        await processOne(queue.indexOf(groupItems[i]));
-      }
-
-      if (gi < groups.length - 1 && !batchAbort) {
-        setStatus(`😴 Cooldown ${cooldownMin} min…`, "");
-        const until = Date.now() + cooldownMs;
-        while (Date.now() < until && !batchAbort) {
-          const s = Math.ceil((until - Date.now()) / 1000);
-          setStatus(`😴 Cooldown: ${Math.floor(s/60)}m ${s%60}s`, "");
-          await new Promise(r => setTimeout(r, 1000));
-        }
-      }
-    }
-
-    batchRunning = false;
-    document.getElementById("aiBatchStartBtn").style.display = "inline-flex";
-    document.getElementById("aiBatchStopBtn").style.display = "none";
-    setStatus(batchAbort ? "⏹️ Stopped" : "🏁 Complete", "ok");
   }
 
   document.getElementById("aiLoadGroupBtn")?.addEventListener("click", () => loadGroup(groupSelect.value));
   document.getElementById("aiRefreshGroups")?.addEventListener("click", refreshGroups);
   document.getElementById("aiProcessOneBtn")?.addEventListener("click", () => {
-    const idx = queue.findIndex(q => q.status === "pending" || q.status === "error");
-    if (idx === -1) return setStatus("No pending items", "error");
+    let idx = selectedIdx;
+    if (!queue[idx] || queue[idx].status === "published") {
+      idx = queue.findIndex(i => i.status === "pending" || i.status === "error");
+    }
+    if (idx === -1) return setStatus("No pending items to process.", "error");
     processOne(idx);
   });
-  document.getElementById("aiBatchStartBtn")?.addEventListener("click", runBatch);
-  document.getElementById("aiBatchStopBtn")?.addEventListener("click", () => { batchAbort = true; });
-  document.getElementById("aiClearBtn")?.addEventListener("click", () => { if (confirm("Clear queue?")) { queue = []; renderQueue(); } });
+  document.getElementById("aiSkipBtn")?.addEventListener("click", () => {
+    const next = queue.findIndex((i, ix) => ix > selectedIdx && (i.status === "pending" || i.status === "error"));
+    if (next !== -1) { selectedIdx = next; renderQueue(); }
+  });
+  document.getElementById("aiClearBtn")?.addEventListener("click", () => {
+    if (!queue.length) return;
+    if (!confirm("Clear the entire queue?")) return;
+    queue = []; selectedIdx = 0; renderQueue();
+  });
 
+  window.refreshAiGroups = refreshGroups;
   refreshGroups();
 })();
 
 // =========================================================
-// PROGRESS DASHBOARD
+// BATCH CONTROL (server-side worker)
+// =========================================================
+(function() {
+  const statusEl = document.getElementById("batchStatus");
+  const startBtn = document.getElementById("aiBatchStartBtn");
+  const stopBtn  = document.getElementById("aiBatchStopBtn");
+  const cooldownInput = document.getElementById("batchCooldown");
+  const sessionInput  = document.getElementById("batchGroupsPerSession");
+  const skipInput     = document.getElementById("batchSkipPublished");
+  if (!statusEl) return;
+
+  let pollTimer = null;
+
+  function formatCooldown(secs) {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m}m ${String(s).padStart(2, "0")}s`;
+  }
+
+  function renderStatus(d) {
+    if (!d.running && !d.last_message && d.groups_total === 0) {
+      statusEl.classList.add("hidden");
+      return;
+    }
+    statusEl.classList.remove("hidden", "paused", "complete");
+    if (d.cooldown_remaining > 0) statusEl.classList.add("paused");
+    if (!d.running && d.groups_done === d.groups_total && d.groups_total > 0) {
+      statusEl.classList.add("complete");
+    }
+
+    statusEl.innerHTML = `
+      <div class="batch-line">
+        <span>📦 Groups</span>
+        <span class="batch-value">${d.groups_done} / ${d.groups_total}</span>
+      </div>
+      <div class="batch-line">
+        <span>📁 Current group</span>
+        <span class="batch-value">${d.current_group || "—"}</span>
+      </div>
+      <div class="batch-line">
+        <span>🎬 Items in group</span>
+        <span class="batch-value">${d.items_done} / ${d.items_total}</span>
+      </div>
+      ${d.cooldown_remaining > 0 ? `
+        <div class="batch-line">
+          <span>😴 Cooldown</span>
+          <span class="batch-value">${formatCooldown(d.cooldown_remaining)}</span>
+        </div>` : ""}
+      <div class="batch-line">
+        <span>${d.running ? "🔵 Running" : "⚪ Idle"}</span>
+        <span class="batch-value">${d.last_message || ""}</span>
+      </div>
+      ${d.last_error ? `<div class="batch-line" style="color:#fca5a5"><span>❌ ${d.last_error}</span></div>` : ""}
+    `;
+
+    if (startBtn) startBtn.style.display = d.running ? "none" : "inline-flex";
+    if (stopBtn)  stopBtn.style.display  = d.running ? "inline-flex" : "none";
+  }
+
+  async function poll() {
+    try {
+      const r = await fetch("/api/batch/status");
+      const d = await r.json();
+      renderStatus(d);
+      if (!d.running) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+    } catch (e) {
+      console.warn("Batch status poll failed:", e);
+    }
+  }
+
+  window.startBatchPolling = function() {
+    if (pollTimer) clearInterval(pollTimer);
+    poll();
+    pollTimer = setInterval(poll, 2000);
+  };
+
+  startBtn?.addEventListener("click", async () => {
+    const cooldown = parseInt(cooldownInput.value) || 30;
+    const perSession = sessionInput.value;
+    const skipPub = skipInput.checked;
+
+    if (!confirm(
+      `Start server-side batch?\n\n` +
+      `• Cooldown: ${cooldown} min\n` +
+      `• Groups per session: ${perSession || "All"}\n` +
+      `• Skip published: ${skipPub}\n\n` +
+      `This runs on the VPS — you can safely refresh or close this tab.`
+    )) return;
+
+    try {
+      const r = await fetch("/api/batch/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          cooldown_minutes: cooldown,
+          groups_per_session: perSession ? parseInt(perSession) : null,
+          skip_published: skipPub,
+        }),
+      });
+      const d = await r.json();
+      if (d.error) {
+        alert("❌ " + d.error);
+        return;
+      }
+      window.startBatchPolling();
+    } catch (e) {
+      alert("❌ " + e.message);
+    }
+  });
+
+  stopBtn?.addEventListener("click", async () => {
+    if (!confirm("Stop the server-side batch?\nCurrent item will finish first.")) return;
+    await fetch("/api/batch/stop", { method: "POST" });
+    window.startBatchPolling();
+  });
+
+  // ---- AUTO-RESUME ON PAGE LOAD ----
+  (async () => {
+    try {
+      const r = await fetch("/api/batch/status");
+      const d = await r.json();
+      console.log("🔍 Batch status on load:", d);
+      if (d.running) {
+        console.log("✅ Server batch is running — resuming status polling");
+        renderStatus(d);
+        window.startBatchPolling();
+      } else if (d.last_message || d.groups_total > 0) {
+        renderStatus(d);
+      }
+    } catch (e) {
+      console.warn("Could not check batch status on load:", e);
+    }
+  })();
+})();
+
+// =========================================================
+// PROGRESS DASHBOARD (server-side group progress)
 // =========================================================
 (function() {
   const statsEl = document.getElementById("progressStats");
   const groupsEl = document.getElementById("progressGroups");
   if (!statsEl) return;
-  function escapeHtml(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]); }
+
+  function escapeHtml(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, c =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+  }
 
   async function load() {
     try {
       const r = await fetch("/api/progress");
       const d = await r.json();
       if (!d.success) return;
+
       statsEl.innerHTML = `
         <div class="stat"><strong>${d.done_groups}</strong>Groups Done</div>
         <div class="stat"><strong>${d.in_progress_groups}</strong>In Progress</div>
         <div class="stat"><strong>${d.pending_groups}</strong>Not Started</div>
         <div class="stat"><strong>${d.processed_urls}/${d.total_urls}</strong>URLs</div>`;
-      const names = Object.keys(d.groups).sort((a, b) => (parseInt(a.replace(/\D/g, "")) || 0) - (parseInt(b.replace(/\D/g, "")) || 0));
+
+      const names = Object.keys(d.groups).sort((a, b) =>
+        (parseInt(a.replace(/\D/g, "")) || 0) - (parseInt(b.replace(/\D/g, "")) || 0));
+
       groupsEl.innerHTML = names.map(name => {
         const g = d.groups[name];
         const total = (g.processed_urls?.length || 0) + (g.pending_urls?.length || 0);
         const done = g.processed_urls?.length || 0;
         const pct = total ? Math.round((done / total) * 100) : 0;
-        return `<div class="progress-group-row status-${g.status}">
-          <span class="pg-name">${escapeHtml(name)}</span>
-          <span class="pg-count">${done}/${total}</span>
-          <div class="pg-bar"><div class="pg-fill" style="width:${pct}%"></div></div>
-        </div>`;
+        const statusClass = g.status === "done" ? "status-done"
+                          : g.status === "in_progress" ? "status-in_progress"
+                          : "status-pending";
+        return `
+          <div class="progress-group-row ${statusClass}">
+            <span class="pg-name">${escapeHtml(name)}</span>
+            <span class="pg-count">${done}/${total}</span>
+            <div class="pg-bar"><div class="pg-fill" style="width:${pct}%"></div></div>
+            <button type="button" class="pg-toggle mini-btn" data-name="${escapeHtml(name)}">▸</button>
+          </div>`;
       }).join("");
+
+      groupsEl.querySelectorAll(".pg-toggle").forEach(btn => {
+        btn.onclick = async () => {
+          const name = btn.dataset.name;
+          const r = await fetch(`/api/progress/${encodeURIComponent(name)}`);
+          const pd = await r.json();
+          const g = pd.data || {};
+          const row = btn.closest(".progress-group-row");
+          const existing = row.nextElementSibling;
+          if (existing && existing.classList.contains("pg-urls")) {
+            existing.remove();
+            btn.textContent = "▸";
+            return;
+          }
+          const div = document.createElement("div");
+          div.className = "pg-urls";
+          const done = g.processed_urls || [];
+          const pending = g.pending_urls || [];
+          div.innerHTML = [
+            ...pending.map(u => `<div class="pg-url pending">⏳ ${escapeHtml(u)}</div>`),
+            ...done.map(u => `<div class="pg-url done">✅ ${escapeHtml(u)}</div>`),
+          ].join("") || '<div style="color:var(--muted)">No URLs</div>';
+          row.after(div);
+          btn.textContent = "▾";
+        };
+      });
     } catch (e) {}
   }
+
   document.getElementById("refreshProgressBtn")?.addEventListener("click", load);
   document.getElementById("resetAllProgressBtn")?.addEventListener("click", async () => {
-    if (!confirm("Reset ALL progress?")) return;
-    await fetch("/api/progress/reset", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm: "yes-reset-all" }) });
+    if (!confirm("Reset ALL progress?\nEvery URL will be marked pending again.")) return;
+    if (!confirm("Really? This cannot be undone.")) return;
+    await fetch("/api/progress/reset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm: "yes-reset-all" }),
+    });
     load();
   });
+
   load();
   setInterval(load, 30000);
 })();
 
 // =========================================================
-// GEMINI SETTINGS
+// GEMINI API KEY SETTINGS
 // =========================================================
 (function() {
   const input = document.getElementById("setGeminiKey");
@@ -715,7 +1204,10 @@ function hideError() { errorBox.classList.add("hidden"); }
   const keyStatus = document.getElementById("geminiKeyStatus");
   if (!input || !saveBtn) return;
 
-  function setStatus(m, cls = "") { statusEl.textContent = m; statusEl.className = "ai-status " + cls; }
+  function setStatus(m, cls = "") {
+    statusEl.textContent = m;
+    statusEl.className = "ai-status " + cls;
+  }
 
   async function loadStatus() {
     try {
@@ -724,39 +1216,62 @@ function hideError() { errorBox.classList.add("hidden"); }
       const g = d.settings?.GEMINI_API_KEY || { set: false };
       keyStatus.className = "key-status " + (g.set ? (g.source === "env" ? "env" : "set") : "not-set");
       keyStatus.textContent = g.set ? (g.source === "env" ? "ENV" : "SET") : "NOT SET";
+      if (g.set) keyStatus.title = `Masked: ${g.masked}`;
     } catch (e) {}
   }
 
   async function testKey() {
-    setStatus("🧪 Testing…", "working");
-    const r = await fetch("/api/settings/test", { method: "POST" });
-    const d = await r.json();
-    if (d.results?.ai?.ok) setStatus("✅ " + d.results.ai.message, "ok");
-    else setStatus("❌ " + (d.results?.ai?.message || "Failed"), "error");
+    setStatus("🧪 Testing key…", "working");
+    try {
+      const r = await fetch("/api/settings/test", { method: "POST" });
+      const d = await r.json();
+      if (d.results?.ai?.ok) setStatus("✅ " + d.results.ai.message, "ok");
+      else setStatus("❌ " + (d.results?.ai?.message || d.error || "Test failed"), "error");
+    } catch (e) {
+      setStatus("❌ " + e.message, "error");
+    }
   }
 
   saveBtn.onclick = async () => {
     const v = input.value.trim();
-    if (!v) return setStatus("Paste a key first", "error");
+    if (!v) return setStatus("Paste a key first.", "error");
+    if (!v.startsWith("AIza")) {
+      if (!confirm("Doesn't look like a Gemini key (usually starts with 'AIza'). Save anyway?")) return;
+    }
     setStatus("💾 Saving…", "working");
-    const r = await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ GEMINI_API_KEY: v }) });
-    const d = await r.json();
-    if (!d.success) return setStatus("❌ " + d.error, "error");
-    input.value = "";
-    setStatus("✅ Saved", "ok");
-    loadStatus();
-    testKey();
+    try {
+      const r = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ GEMINI_API_KEY: v }),
+      });
+      const d = await r.json();
+      if (!d.success) throw new Error(d.error || "Save failed");
+      input.value = "";
+      await loadStatus();
+      await testKey();
+    } catch (e) {
+      setStatus("❌ " + e.message, "error");
+    }
   };
 
   testBtn.onclick = testKey;
+
   clearBtn.onclick = async () => {
-    if (!confirm("Clear API key?")) return;
-    await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ GEMINI_API_KEY: "" }) });
-    input.value = "";
-    loadStatus();
-    setStatus("✅ Cleared", "ok");
+    if (!confirm("Clear the saved Gemini API key?")) return;
+    setStatus("🗑️ Clearing…", "working");
+    try {
+      await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ GEMINI_API_KEY: "" }),
+      });
+      input.value = "";
+      await loadStatus();
+      setStatus("✅ Cleared.", "ok");
+    } catch (e) {
+      setStatus("❌ " + e.message, "error");
+    }
   };
 
   loadStatus();
