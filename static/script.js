@@ -1446,7 +1446,6 @@ ${escapeHtml(item.aiHashtags)}</div>`;
 
       renderQueue();
 
-      // ---- AUTO-ADVANCE ----
       const nextIdx = queue.findIndex((i, ix) =>
         ix > selectedIdx && (i.status === "pending" || i.status === "error"));
       if (nextIdx !== -1) {
@@ -1538,6 +1537,119 @@ ${escapeHtml(item.aiHashtags)}</div>`;
 
   window.refreshAiGroups = refreshGroups;
   refreshGroups();
+})();
+
+// =========================================================
+// GEMINI API KEY SETTINGS
+// =========================================================
+(function() {
+  const input       = document.getElementById("setGeminiKey");
+  const saveBtn     = document.getElementById("saveGeminiBtn");
+  const testBtn     = document.getElementById("testGeminiBtn");
+  const clearBtn    = document.getElementById("clearGeminiBtn");
+  const statusEl    = document.getElementById("geminiSettingsStatus");
+  const keyStatus   = document.getElementById("geminiKeyStatus");
+
+  if (!input || !saveBtn) return;
+
+  function setStatus(msg, cls = "") {
+    statusEl.textContent = msg;
+    statusEl.className = "ai-status " + cls;
+  }
+
+  function updateKeyStatus(data) {
+    if (!keyStatus) return;
+    keyStatus.className = "key-status";
+    if (data.set) {
+      keyStatus.textContent = data.source === "env" ? "ENV" : "SET";
+      keyStatus.classList.add(data.source === "env" ? "env" : "set");
+      keyStatus.title = `Masked: ${data.masked}`;
+    } else {
+      keyStatus.textContent = "NOT SET";
+      keyStatus.classList.add("not-set");
+      keyStatus.title = "";
+    }
+  }
+
+  async function loadStatus() {
+    try {
+      const r = await fetch("/api/settings");
+      const data = await r.json();
+      if (data.success) {
+        updateKeyStatus(data.settings.GEMINI_API_KEY || { set: false });
+      }
+    } catch (err) {
+      console.warn("Could not load settings:", err);
+    }
+  }
+
+  async function saveKey(value) {
+    setStatus("💾 Saving…", "working");
+    try {
+      const r = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ GEMINI_API_KEY: value }),
+      });
+      const data = await r.json();
+      if (!data.success) throw new Error(data.error || "Save failed");
+
+      setStatus("✅ Saved. Testing key…", "ok");
+      input.value = "";
+      await loadStatus();
+      await testKey();
+    } catch (err) {
+      setStatus("❌ " + err.message, "error");
+    }
+  }
+
+  async function testKey() {
+    setStatus("🧪 Testing key…", "working");
+    try {
+      const r = await fetch("/api/settings/test", { method: "POST" });
+      const data = await r.json();
+      if (data.success && data.results?.ai?.ok) {
+        setStatus("✅ Key works! " + (data.results.ai.message || ""), "ok");
+      } else {
+        const msg = data.results?.ai?.message || data.error || "Test failed";
+        setStatus("❌ " + msg, "error");
+      }
+    } catch (err) {
+      setStatus("❌ " + err.message, "error");
+    }
+  }
+
+  saveBtn?.addEventListener("click", () => {
+    const v = (input.value || "").trim();
+    if (!v) { setStatus("Paste a key first.", "error"); return; }
+    if (!v.startsWith("AIza")) {
+      if (!confirm("This doesn't look like a Gemini key (usually starts with 'AIza'). Save anyway?")) return;
+    }
+    saveKey(v);
+  });
+
+  testBtn?.addEventListener("click", testKey);
+
+  clearBtn?.addEventListener("click", async () => {
+    if (!confirm("Clear the saved Gemini API key?")) return;
+    setStatus("🗑️ Clearing…", "working");
+    try {
+      const r = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ GEMINI_API_KEY: "" }),
+      });
+      const data = await r.json();
+      if (!data.success) throw new Error(data.error || "Clear failed");
+      input.value = "";
+      await loadStatus();
+      setStatus("✅ Key cleared.", "ok");
+    } catch (err) {
+      setStatus("❌ " + err.message, "error");
+    }
+  });
+
+  loadStatus();
 })();
 
 // =========================================================

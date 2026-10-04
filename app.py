@@ -11,6 +11,7 @@ Features:
   - Permanent original saved to /outputs/ for the compare view
   - CSV group loading + UI upload for groups-metadata/
   - Gemini AI content reformatting for TinyToon World
+  - Gemini API key editable from the UI (settings.json)
   - Buffer API integration for YouTube Shorts auto-posting
   - Auto cleanup of old outputs
 """
@@ -119,6 +120,72 @@ BUFFER_API_KEY = os.environ.get("BUFFER_API_KEY", "")
 BUFFER_YOUTUBE_CHANNEL_ID = os.environ.get("BUFFER_YOUTUBE_CHANNEL_ID", "")
 
 
+# =========================================================
+# SETTINGS — runtime-editable keys saved to settings.json
+# =========================================================
+SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
+SETTINGS_LOCK = threading.Lock()
+
+# Keys that can be overridden via the UI
+EDITABLE_SETTINGS = ("GEMINI_API_KEY",)
+
+
+def _load_settings():
+    try:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"  ⚠️  Could not read settings.json: {e}")
+    return {}
+
+
+def _save_settings(data):
+    try:
+        tmp = SETTINGS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, SETTINGS_FILE)
+        # Restrict permissions (only owner can read)
+        try:
+            os.chmod(SETTINGS_FILE, 0o600)
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        print(f"  ⚠️  Could not write settings.json: {e}")
+        return False
+
+
+def _get_setting(name, default=""):
+    """UI-saved value takes priority over env var."""
+    settings = _load_settings()
+    if name in settings and settings[name]:
+        return settings[name]
+    return os.environ.get(name, default)
+
+
+def _get_gemini_key():
+    """Get the current Gemini key (UI override > env var)."""
+    return _get_setting("GEMINI_API_KEY", "")
+
+
+def _apply_gemini_key_to_engine():
+    """Push the current Gemini key into the ai_engine module."""
+    try:
+        import ai_engine
+        new_key = _get_gemini_key()
+        if new_key and new_key != ai_engine.GEMINI_API_KEY:
+            ai_engine.GEMINI_API_KEY = new_key
+            ai_engine._model = None   # force re-init on next call
+            print(f"  🔑 Gemini key updated (len={len(new_key)})")
+    except Exception as e:
+        print(f"  ⚠️  Could not update Gemini key in engine: {e}")
+
+
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_BYTES
 
@@ -205,7 +272,6 @@ def _probe_duration(fpath):
 
 
 def public_url(path: str) -> str:
-    """Build an absolute URL for the given path."""
     if PUBLIC_API_BASE:
         return f"{PUBLIC_API_BASE}{path}"
     try:
@@ -506,14 +572,6 @@ threading.Thread(target=_cleanup_old_outputs, daemon=True).start()
 # CSV GROUP LOADING
 # =========================================================
 def _load_csv_group(csv_path):
-    """
-    Load one group CSV → list of dicts.
-
-    Handles multiple formats:
-      - url,title,description
-      - Video ID,Title,Description    ← TinyToon format
-      - video_url,video_title,video_description
-    """
     items = []
     try:
         with open(csv_path, "r", encoding="utf-8-sig") as f:
@@ -521,7 +579,6 @@ def _load_csv_group(csv_path):
             raw_fields = reader.fieldnames or []
             fieldnames = [n.strip().lower() for n in raw_fields]
 
-            # --- Detect ID/URL column ---
             id_col = None
             url_col = None
 
@@ -535,7 +592,6 @@ def _load_csv_group(csv_path):
                         url_col = n
                         break
 
-            # --- Detect title & description ---
             title_col = next((n for n in fieldnames if n in ("title", "video_title", "name")), None)
             desc_col = next((n for n in fieldnames if n in ("description", "video_description", "desc", "caption")), None)
 
@@ -543,19 +599,16 @@ def _load_csv_group(csv_path):
                 print(f"  ⚠️  No ID or URL column in {csv_path}")
                 return items
 
-            # Re-read to get raw rows
             f.seek(0)
             reader = csv.DictReader(f)
 
             for i, row in enumerate(reader):
-                # Case-insensitive lookup
                 row_lc = {}
                 for k, v in row.items():
                     if k is None:
                         continue
                     row_lc[k.strip().lower()] = (v or "").strip()
 
-                # Resolve URL
                 url = ""
                 if url_col:
                     url = row_lc.get(url_col, "").strip()
@@ -588,8 +641,6 @@ def api_groups():
     try:
         pattern = os.path.join(GROUPS_DIR, "*.csv")
         all_files = glob.glob(pattern)
-        print(f"  📂 Found {len(all_files)} .csv files in {GROUPS_DIR}")
-
         files = sorted(all_files, key=lambda p: (
             int("".join(c for c in os.path.basename(p) if c.isdigit()) or 0),
             os.path.basename(p)
@@ -622,7 +673,7 @@ def api_group_detail(name):
 
 
 # =========================================================
-# UPLOAD CSV FILES INTO groups-metadata/
+# UPLOAD CSV FILES
 # =========================================================
 @app.route("/api/upload_csv", methods=["POST"])
 def upload_csv():
@@ -655,7 +706,6 @@ def upload_csv():
         dest = os.path.join(GROUPS_DIR, safe_name)
         try:
             f.save(dest)
-            # Validate CSV
             try:
                 with open(dest, "r", encoding="utf-8-sig") as fh:
                     reader = csv.DictReader(fh)
@@ -689,17 +739,20 @@ def delete_csv(name):
 
 
 # =========================================================
-# AI — REFORMAT TITLE + DESCRIPTION FOR TINYTOON WORLD
+# AI — REFORMAT TITLE + DESCRIPTION
 # =========================================================
 @app.route("/api/ai/status")
 def ai_status():
+    _apply_gemini_key_to_engine()
     return jsonify(available=ai_available())
 
 
 @app.route("/api/ai/reformat", methods=["POST"])
 def ai_reformat():
+    _apply_gemini_key_to_engine()
+
     if not ai_available():
-        return jsonify(error="AI not configured. Set GEMINI_API_KEY on the server."), 503
+        return jsonify(error="AI not configured. Set GEMINI_API_KEY in the settings panel."), 503
 
     data = request.get_json(silent=True) or {}
     title = (data.get("title") or "").strip()
@@ -715,6 +768,88 @@ def ai_reformat():
     except Exception as e:
         print(f"  ⚠️  AI reformat failed: {e}")
         return jsonify(error=str(e)), 500
+
+
+# =========================================================
+# SETTINGS — GEMINI API KEY
+# =========================================================
+@app.route("/api/settings", methods=["GET"])
+def api_settings_get():
+    """Return which settings are set (masked). Never expose full keys."""
+    settings = _load_settings()
+    out = {}
+
+    # Gemini
+    ui_key = settings.get("GEMINI_API_KEY", "")
+    env_key = os.environ.get("GEMINI_API_KEY", "")
+    effective = ui_key or env_key
+
+    if effective:
+        masked = effective[:6] + "…" + effective[-4:] if len(effective) > 12 else "••••"
+        source = "ui" if ui_key else "env"
+        out["GEMINI_API_KEY"] = {"set": True, "masked": masked, "source": source}
+    else:
+        out["GEMINI_API_KEY"] = {"set": False, "masked": "", "source": None}
+
+    return jsonify(success=True, settings=out)
+
+
+@app.route("/api/settings", methods=["POST"])
+def api_settings_post():
+    """Update settings. Body: {"GEMINI_API_KEY": "AIza..."}"""
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify(success=False, error="Invalid payload"), 400
+
+    with SETTINGS_LOCK:
+        settings = _load_settings()
+        changed = []
+
+        for k, v in data.items():
+            if k not in EDITABLE_SETTINGS:
+                continue
+            v = (v or "").strip()
+            if v:
+                settings[k] = v
+                changed.append(k)
+            else:
+                if k in settings:
+                    del settings[k]
+                    changed.append(f"{k} (cleared)")
+
+        if not _save_settings(settings):
+            return jsonify(success=False, error="Could not save settings.json"), 500
+
+    _apply_gemini_key_to_engine()
+
+    return jsonify(success=True, changed=changed)
+
+
+@app.route("/api/settings/test", methods=["POST"])
+def api_settings_test():
+    """Test the currently-configured Gemini key."""
+    _apply_gemini_key_to_engine()
+
+    results = {}
+
+    try:
+        import ai_engine
+        key = _get_gemini_key()
+
+        if not ai_engine._GENAI_AVAILABLE:
+            results["ai"] = {"ok": False, "message": "google-generativeai not installed"}
+        elif not key:
+            results["ai"] = {"ok": False, "message": "Gemini API key not set"}
+        else:
+            try:
+                raw = ai_engine.regenerate_for_tinytoon("Test Title", "Test description")
+                results["ai"] = {"ok": True, "message": f"OK — got {len(raw)} chars"}
+            except Exception as e:
+                results["ai"] = {"ok": False, "message": str(e)}
+    except Exception as e:
+        results["ai"] = {"ok": False, "message": str(e)}
+
+    return jsonify(success=True, results=results)
 
 
 # =========================================================
@@ -737,12 +872,10 @@ def run_job(job_id, input_path, options):
             segment_duration=options["segment_duration"],
             effects_per_segment=options["effects_per_segment"],
             enabled_effects=options["enabled_effects"],
-
             base_effects=options["base_effects"],
             ordered_effects=options["ordered_effects"],
             effect_windows=options["effect_windows"],
             rotate_order=options["rotate_order"],
-
             preserve_audio=options["preserve_audio"],
             group_by_category=options["group_by_category"],
             category_run_length=options["category_run_length"],
@@ -750,13 +883,10 @@ def run_job(job_id, input_path, options):
             scene_threshold=options["scene_threshold"],
             crop_top_pct=options["crop_top_pct"],
             crop_bottom_pct=options["crop_bottom_pct"],
-
             quality_preset=options["quality_preset"],
-
             progress_callback=cb,
         )
 
-        # Save permanent original for the compare view
         try:
             original_name = f"original_{job_id}.mp4"
             original_out = os.path.join(OUTPUT_DIR, original_name)
@@ -764,7 +894,6 @@ def run_job(job_id, input_path, options):
                 shutil.copy2(input_path, original_out)
                 with JOBS_LOCK:
                     job["original_output"] = original_name
-                print(f"  📼 Original saved: {original_out}")
         except Exception as e:
             print(f"  ⚠️  Could not save original: {e}")
 
@@ -1079,6 +1208,15 @@ def publish_to_youtube(job_id):
         return jsonify(success=True, buffer_result=buffer_result)
     except requests.exceptions.RequestException as e:
         return jsonify(error=str(e)), 500
+
+
+# =========================================================
+# APPLY SAVED SETTINGS ON STARTUP
+# =========================================================
+try:
+    _apply_gemini_key_to_engine()
+except Exception as _e:
+    print(f"  ⚠️  Startup settings refresh failed: {_e}")
 
 
 # =========================================================

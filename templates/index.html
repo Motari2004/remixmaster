@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>🎬 Remix Master</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=2026-10-04c" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=2026-10-04d" />
 </head>
 <body>
   <div class="app">
@@ -186,7 +186,7 @@
 
         <button id="remixBtn" class="primary" disabled>🚀 Remix It!</button>
 
-        <!-- ============ CSV MANAGER ============ -->
+        <!-- ============ 5. CSV MANAGER ============ -->
         <h2>5. Group CSV Manager</h2>
 
         <div class="order-block" id="csvBlock">
@@ -224,7 +224,7 @@
           <div id="csvFileList" class="csv-file-list"></div>
         </div>
 
-        <!-- ============ AI ONE-BY-ONE PROCESSING ============ -->
+        <!-- ============ 6. AI ONE-BY-ONE ============ -->
         <h2>6. AI One-by-One Processing</h2>
 
         <div class="order-block" id="aiBlock">
@@ -271,7 +271,6 @@ Wow, yummy!..."></textarea>
 
           <hr style="border-color:var(--border);margin:16px 0" />
 
-          <!-- ONE-BY-ONE CONTROLS -->
           <div class="ai-actions">
             <button type="button" id="aiProcessOneBtn" class="mini-btn process-btn-main">
               ▶️ Process Next
@@ -287,7 +286,6 @@ Wow, yummy!..."></textarea>
             </button>
           </div>
 
-          <!-- CURRENT ITEM PROGRESS PANEL -->
           <div id="aiProgressPanel" class="ai-progress-panel hidden">
             <h4>▶️ Processing: <span id="aiCurrentTitle">—</span></h4>
             <div class="ai-steps" id="aiSteps">
@@ -306,6 +304,46 @@ Wow, yummy!..."></textarea>
           <div id="aiStats" class="ai-stats"></div>
           <div id="aiQueue" class="ai-queue"></div>
         </div>
+
+        <!-- ============ 7. AI SETTINGS ============ -->
+        <h2>7. AI Settings</h2>
+
+        <div class="order-block" id="settingsBlock">
+          <h3>🔑 Gemini API Key</h3>
+          <p class="hint">
+            Paste your Google Gemini API key here. It's saved on the server
+            in <code>settings.json</code> — no restart needed.
+            Get one free at
+            <a href="https://aistudio.google.com/app/apikey" target="_blank"
+               style="color:var(--accent-2)">aistudio.google.com/app/apikey</a>.
+          </p>
+
+          <div class="settings-field">
+            <label>
+              <span class="label-text">
+                API Key
+                <span id="geminiKeyStatus" class="key-status"></span>
+              </span>
+              <input type="password" id="setGeminiKey"
+                     placeholder="AIzaSy..." autocomplete="off" />
+            </label>
+          </div>
+
+          <div class="ai-actions" style="margin-top:12px">
+            <button type="button" id="saveGeminiBtn" class="mini-btn process-btn-main">
+              💾 Save Key
+            </button>
+            <button type="button" id="testGeminiBtn" class="mini-btn">
+              🧪 Test Key
+            </button>
+            <button type="button" id="clearGeminiBtn" class="mini-btn">
+              🗑️ Clear
+            </button>
+          </div>
+
+          <div id="geminiSettingsStatus" class="ai-status"></div>
+        </div>
+
       </section>
 
       <!-- RIGHT: PREVIEW -->
@@ -383,6 +421,6 @@ Wow, yummy!..."></textarea>
     <footer>Made with 🐍 Python · Flask · MoviePy</footer>
   </div>
 
-  <script src="{{ url_for('static', filename='script.js') }}?v=2026-10-04c"></script>
+  <script src="{{ url_for('static', filename='script.js') }}?v=2026-10-04d"></script>
 </body>
 </html>

@@ -1,20 +1,16 @@
 """
 🎬 AI Engine — Gemini-powered content reformatter for TinyToon World.
 
-Provides:
-  - regenerate_for_tinytoon(title, description) → raw AI text
-  - parse_ai_response(text) → dict with title, caption, description, hashtags
-  - is_available() → bool (checks if API key + library are present)
+Reads the API key from:
+  1. settings.json (set via UI) — highest priority
+  2. GEMINI_API_KEY env var — fallback
 
 Requires:
   pip install google-generativeai
-
-Environment:
-  GEMINI_API_KEY  — your Google AI Studio key
-  GEMINI_MODEL    — optional, defaults to "gemini-1.5-flash"
 """
 
 import os
+import json as _json
 
 try:
     import google.generativeai as genai
@@ -33,29 +29,67 @@ GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
 _model = None
 
 
+def _settings_path():
+    """Path to settings.json (respects DATA_DIR)."""
+    return os.path.join(
+        os.environ.get("DATA_DIR", os.path.dirname(os.path.abspath(__file__))),
+        "settings.json",
+    )
+
+
+def _read_key_from_settings():
+    """Return the key saved via the UI (or None)."""
+    try:
+        path = _settings_path()
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                s = _json.load(f)
+            if isinstance(s, dict) and s.get("GEMINI_API_KEY"):
+                return s["GEMINI_API_KEY"]
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_key():
+    """Key priority: settings.json > env var > module global."""
+    return _read_key_from_settings() or GEMINI_API_KEY
+
+
+# =========================================================
+# MODEL INIT
+# =========================================================
 def _get_model():
-    """Lazy-init the Gemini model on first use."""
+    """Lazy-init the Gemini model. Re-reads the key each time it changes."""
     global _model
-    if _model is not None:
-        return _model
+
+    key = _resolve_key()
+
     if not _GENAI_AVAILABLE:
         raise RuntimeError(
             "google-generativeai is not installed. "
             "Run: pip install google-generativeai"
         )
-    if not GEMINI_API_KEY:
+    if not key:
         raise RuntimeError(
-            "GEMINI_API_KEY is not set on the server. "
-            "Add it to /etc/systemd/system/remix.service"
+            "Gemini API key not set. Add it in the UI Settings panel."
         )
-    genai.configure(api_key=GEMINI_API_KEY)
-    _model = genai.GenerativeModel(GEMINI_MODEL_NAME)
-    print(f"  ✅ Gemini model ready: {GEMINI_MODEL_NAME}")
+
+    # Rebuild if the key changed
+    if _model is None or key != getattr(_model, "_key", None):
+        genai.configure(api_key=key)
+        _model = genai.GenerativeModel(GEMINI_MODEL_NAME)
+        try:
+            _model._key = key
+        except Exception:
+            pass
+        print(f"  ✅ Gemini model ready: {GEMINI_MODEL_NAME} (key …{key[-4:]})")
+
     return _model
 
 
 # =========================================================
-# SYSTEM PROMPT — TinyToon World
+# SYSTEM PROMPT
 # =========================================================
 SYSTEM_PROMPT = """You are a content formatter for TinyToon World, a kids YouTube channel.
 
@@ -93,34 +127,26 @@ RULES:
 - Use emojis generously but not excessively
 - Preserve the channel link placeholder [Your Channel Link] as-is
 - Always keep the exact three "Watch More Fun Songs" links
-- Output ONLY the formatted text — no preamble, no markdown fences, no extra commentary
+- Output ONLY the formatted text — no preamble, no markdown fences
 """
 
 
 # =========================================================
-# CORE FUNCTION
+# CORE
 # =========================================================
 def regenerate_for_tinytoon(title: str, description: str) -> str:
-    """
-    Send a title + description to Gemini, get back the reformatted
-    TinyToon World version.
-    """
     model = _get_model()
-
     prompt = f"""{SYSTEM_PROMPT}
 
 INPUT:
 TITLE: {title}
 DESCRIPTION: {description}"""
-
     response = model.generate_content(prompt)
 
-    # Extract text safely (some responses come back with safety blocks)
     text = ""
     try:
         text = response.text
-    except Exception as e:
-        # Fallback: pull text from candidates
+    except Exception:
         try:
             if response.candidates:
                 parts = response.candidates[0].content.parts
@@ -129,44 +155,13 @@ DESCRIPTION: {description}"""
             pass
 
     if not text:
-        raise RuntimeError(
-            "Gemini returned an empty response. "
-            "The content may have been blocked by safety filters."
-        )
+        raise RuntimeError("Gemini returned an empty response (possibly blocked by safety filters).")
 
     return text
 
 
-# =========================================================
-# PARSE THE AI RESPONSE
-# =========================================================
 def parse_ai_response(text: str) -> dict:
-    """
-    Parse the AI's structured response into a dict with keys:
-        title, caption, description, hashtags, raw
-
-    The AI is instructed to output in this format:
-
-        TITLE:
-        ...
-
-        CAPTION:
-        ...
-
-        DESCRIPTION:
-        ...
-
-        HASHTAGS:
-        ...
-    """
-    result = {
-        "title": "",
-        "caption": "",
-        "description": "",
-        "hashtags": "",
-        "raw": text,
-    }
-
+    result = {"title": "", "caption": "", "description": "", "hashtags": "", "raw": text}
     upper = text.upper()
     markers = {
         "TITLE:":       "title",
@@ -174,8 +169,6 @@ def parse_ai_response(text: str) -> dict:
         "DESCRIPTION:": "description",
         "HASHTAGS:":    "hashtags",
     }
-
-    # Locate each marker in order
     positions = []
     for marker, key in markers.items():
         idx = upper.find(marker)
@@ -183,96 +176,42 @@ def parse_ai_response(text: str) -> dict:
             positions.append((idx, marker, key))
     positions.sort()
 
-    # Extract each section's content between markers
     for i, (start_idx, marker, key) in enumerate(positions):
         content_start = start_idx + len(marker)
         content_end = positions[i + 1][0] if i + 1 < len(positions) else len(text)
-        value = text[content_start:content_end].strip()
-        result[key] = value
+        result[key] = text[content_start:content_end].strip()
 
-    # If the AI didn't follow the format, put everything in raw
     if not any(result[k] for k in ("title", "caption", "description")):
-        result["title"] = text.strip()[:200]  # best-effort fallback
+        result["title"] = text.strip()[:200]
 
     return result
 
 
-# =========================================================
-# AVAILABILITY CHECK
-# =========================================================
 def is_available() -> bool:
-    """Return True if the AI engine is ready to use."""
-    return _GENAI_AVAILABLE and bool(GEMINI_API_KEY)
+    if not _GENAI_AVAILABLE:
+        return False
+    return bool(_resolve_key())
 
 
 # =========================================================
-# BATCH HELPER (optional — for testing or future use)
-# =========================================================
-def regenerate_batch(items, delay=1.2):
-    """
-    Reformat a list of items sequentially with a delay between calls
-    to respect rate limits.
-
-    items: list of dicts with keys {id, title, description}
-    delay: seconds to wait between API calls
-
-    Returns a list of dicts: {id, parsed, error, raw}
-    """
-    import time
-
-    results = []
-    for item in items:
-        item_id = item.get("id", "")
-        title = (item.get("title") or "").strip()
-        description = (item.get("description") or "").strip()
-
-        if not title:
-            results.append({"id": item_id, "error": "Missing title", "parsed": None, "raw": ""})
-            continue
-
-        try:
-            raw = regenerate_for_tinytoon(title, description)
-            parsed = parse_ai_response(raw)
-            results.append({"id": item_id, "error": None, "parsed": parsed, "raw": raw})
-        except Exception as e:
-            results.append({"id": item_id, "error": str(e), "parsed": None, "raw": ""})
-
-        # Rate limit protection
-        if delay > 0:
-            time.sleep(delay)
-
-    return results
-
-
-# =========================================================
-# SELF-TEST (run this file directly to test)
+# SELF-TEST
 # =========================================================
 if __name__ == "__main__":
     print("🧪 Testing AI Engine")
-    print(f"   - Library available: {_GENAI_AVAILABLE}")
-    print(f"   - API key set:       {bool(GEMINI_API_KEY)}")
-    print(f"   - Model:             {GEMINI_MODEL_NAME}")
-    print(f"   - Ready:             {is_available()}")
+    print(f"   Library:     {_GENAI_AVAILABLE}")
+    print(f"   Key:         {'set' if _resolve_key() else 'NOT set'}")
+    print(f"   Model:       {GEMINI_MODEL_NAME}")
+    print(f"   Available:   {is_available()}")
 
     if not is_available():
-        print("\n❌ AI not available. Check GEMINI_API_KEY and install google-generativeai.")
+        print("\n❌ AI not available.")
         raise SystemExit(1)
 
-    print("\n🤖 Sending test prompt…")
+    print("\n🤖 Test call…")
     try:
-        raw = regenerate_for_tinytoon(
-            "Fruit Ice Cream! 🍦🍓 Sharing is Caring",
-            "Wow, yummy! The funny toy bear really wants some delicious fruit ice cream...",
-        )
-        print("\n✅ Raw response:\n")
-        print(raw[:1000])
-
-        parsed = parse_ai_response(raw)
-        print("\n📋 Parsed:")
-        print(f"   Title:       {parsed['title'][:100]}")
-        print(f"   Caption:     {parsed['caption'][:100]}")
-        print(f"   Description: {parsed['description'][:100]}")
-        print(f"   Hashtags:    {parsed['hashtags'][:100]}")
+        raw = regenerate_for_tinytoon("Test Title", "Test description")
+        print("\n✅ Response:\n")
+        print(raw[:600])
     except Exception as e:
         print(f"\n❌ Error: {e}")
         raise SystemExit(1)
